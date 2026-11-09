@@ -15,3 +15,7 @@ pub const FILE_PLUS: &str = "\u{e0c9}";
 pub const AUDIO_LINES: &str = "\u{e55a}";
 pub const HEADPHONES: &str = "\u{e0f1}";
 pub const IMPORT: &str = "\u{e22f}";
+pub const SLIDERS: &str = "\u{e29a}";
+pub const MIXER: &str = "\u{e162}";
+pub const SPARKLES: &str = "\u{e412}";
+pub const POWER: &str = "\u{e140}";

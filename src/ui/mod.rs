@@ -1,7 +1,9 @@
 //! The Oxbeat window: Focus layout (top bar, tracks, keyboard strip).
 
+mod effects_panel;
 mod icons;
 mod keyboard_strip;
+mod mixer;
 mod sound_browser;
 pub mod studio;
 mod theme;
@@ -30,8 +32,18 @@ const INPUT_RETRY: Duration = Duration::from_secs(2);
 pub use theme::apply as apply_theme;
 use theme::{BG, BORDER, RECORD, SURFACE};
 
+/// What the panel along the bottom shows.
+#[derive(Clone, Copy, PartialEq)]
+enum Bottom {
+    /// The keyboard, drum pads or microphone of the selected track.
+    Play,
+    Effects,
+    Mixer,
+}
+
 pub struct OxbeatApp {
     studio: Studio,
+    bottom: Bottom,
     audio: Option<AudioOutput>,
     audio_error: Option<String>,
     input: Option<AudioInput>,
@@ -73,6 +85,7 @@ impl OxbeatApp {
         }));
         let mut app = Self {
             studio,
+            bottom: Bottom::Play,
             audio,
             audio_error,
             input: None,
@@ -91,7 +104,32 @@ impl OxbeatApp {
             mouse_note: None,
         };
         app.rescan_midi();
+        #[cfg(debug_assertions)]
+        app.demo();
         app
+    }
+
+    /// Debug builds only: `OXBEAT_DEMO=effects` or `=mixer` opens on that panel with a
+    /// few tracks, for checking the look without clicking through the app.
+    #[cfg(debug_assertions)]
+    fn demo(&mut self) {
+        let Ok(what) = std::env::var("OXBEAT_DEMO") else {
+            return;
+        };
+        let p = &mut self.studio.project;
+        p.add_drums_track("Studio Kit");
+        let voice = p.add_voice_track();
+        if let Some(t) = p.track_mut(voice) {
+            t.effects = crate::project::effects::preset("Tuned Pop");
+            t.pan = 0.3;
+        }
+        self.studio.select(voice);
+        self.studio.sync();
+        self.bottom = match what.as_str() {
+            "mixer" => Bottom::Mixer,
+            "effects" => Bottom::Effects,
+            _ => Bottom::Play,
+        };
     }
 
     fn rescan_midi(&mut self) {
@@ -321,8 +359,10 @@ impl eframe::App for OxbeatApp {
         // Keep the playhead moving and keep checking for keyboards.
         let next = if self.studio.playing {
             Duration::from_millis(16)
-        } else if self.input.is_some() && self.studio.voice_selected() {
-            // Keep the level meter alive.
+        } else if (self.input.is_some() && self.studio.voice_selected())
+            || (self.bottom == Bottom::Mixer && self.studio.meters_moving())
+        {
+            // Keep the level meters alive.
             Duration::from_millis(33)
         } else {
             MIDI_RESCAN
@@ -387,13 +427,35 @@ impl eframe::App for OxbeatApp {
                     .stroke(egui::Stroke::new(1.0, BORDER)),
             )
             .show(ui, |ui| {
-                keyboard_strip::show(
-                    ui,
-                    &mut self.studio,
-                    &mut self.octave,
-                    &mut self.mouse_note,
-                    &self.keyboards,
-                );
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        for (tab, glyph, tip) in [
+                            (Bottom::Play, icons::KEYBOARD_MUSIC, "Play"),
+                            (Bottom::Effects, icons::SLIDERS, "Effects"),
+                            (Bottom::Mixer, icons::MIXER, "Mixer"),
+                        ] {
+                            if theme::icon_button(ui, glyph, 30.0, self.bottom == tab)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                self.bottom = tab;
+                            }
+                        }
+                    });
+                    ui.vertical(|ui| match self.bottom {
+                        Bottom::Play => keyboard_strip::show(
+                            ui,
+                            &mut self.studio,
+                            &mut self.octave,
+                            &mut self.mouse_note,
+                            &self.keyboards,
+                        ),
+                        Bottom::Effects => effects_panel::show(ui, &mut self.studio),
+                        Bottom::Mixer => mixer::show(ui, &mut self.studio),
+                    });
+                });
             });
 
         egui::CentralPanel::default()

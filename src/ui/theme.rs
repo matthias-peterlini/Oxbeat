@@ -266,3 +266,75 @@ pub fn vsep(ui: &mut Ui, height: f32) {
     ui.painter()
         .rect_filled(Rect::from_min_size(rect.min, rect.size()), 0, BORDER);
 }
+
+/// Angle of a knob's pointer at position `t` (0.0..=1.0): a 270° sweep, open at the bottom.
+fn knob_angle(t: f32) -> f32 {
+    std::f32::consts::PI * (0.75 + 1.5 * t.clamp(0.0, 1.0))
+}
+
+/// A rotary knob for `value` (0.0..=1.0). Drag up or down to turn it (hold Shift for
+/// fine steps); double-click to go back to `default`.
+pub fn knob(ui: &mut Ui, value: &mut f32, default: f32, size: f32, color: Color32) -> Response {
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
+    let before = *value;
+    if resp.double_clicked() {
+        *value = default;
+    } else if resp.dragged() {
+        let fine = ui.input(|i| i.modifiers.shift);
+        let per_pixel = if fine { 1.0 / 900.0 } else { 1.0 / 160.0 };
+        *value = (*value - resp.drag_delta().y * per_pixel).clamp(0.0, 1.0);
+    }
+    if *value != before {
+        resp.mark_changed();
+    }
+
+    let center = rect.center();
+    let radius = size / 2.0 - 2.0;
+    let arc = |from: f32, to: f32| -> Vec<egui::Pos2> {
+        let steps = 24;
+        (0..=steps)
+            .map(|i| {
+                let a = knob_angle(from + (to - from) * i as f32 / steps as f32);
+                center + radius * vec2(a.cos(), a.sin())
+            })
+            .collect()
+    };
+    let p = ui.painter();
+    let width = (size / 12.0).clamp(2.0, 3.5);
+    p.add(egui::Shape::line(
+        arc(0.0, 1.0),
+        Stroke::new(width, SURFACE_3),
+    ));
+    // The lit part runs from where the knob rests (centre for pan, zero for most).
+    let rest = if (default - 0.5).abs() < 1e-3 {
+        0.5
+    } else {
+        0.0
+    };
+    if (*value - rest).abs() > 1e-3 {
+        p.add(egui::Shape::line(
+            arc(rest, *value),
+            Stroke::new(width, color),
+        ));
+    }
+    let a = knob_angle(*value);
+    let dir = vec2(a.cos(), a.sin());
+    let hot = resp.hovered() || resp.dragged();
+    p.circle_filled(
+        center,
+        radius - width - 1.5,
+        if hot {
+            SURFACE_3
+        } else {
+            Color32::from_rgb(0x30, 0x33, 0x3a)
+        },
+    );
+    p.line_segment(
+        [
+            center + dir * (radius * 0.25),
+            center + dir * (radius - width - 3.0),
+        ],
+        Stroke::new(1.5, if hot { TEXT } else { TEXT_DIM }),
+    );
+    resp.on_hover_cursor(egui::CursorIcon::ResizeVertical)
+}

@@ -7,13 +7,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::audio::recorder::Recorder;
-use crate::engine::commands::{EngineCommand, EngineEvent, Meters, UiEnd};
+use crate::engine::commands::{EngineCommand, EngineEvent, METER_TRACKS, Meters, UiEnd};
+use crate::engine::fx::Chain;
 use crate::engine::instrument::{Instrument, sound_hash};
 use crate::engine::sampler::SampleData;
+use crate::project::effects::EffectKind;
 use crate::project::{Clip, Note, Project};
 
 /// Voice takes shorter than this (an accidental tap of R) are thrown away.
 const MIN_TAKE_SECONDS: f64 = 0.05;
+/// How much of a meter's level is left one screen frame later.
+const METER_FALL: f32 = 0.85;
 /// Frames summarised by each waveform peak.
 const FRAMES_PER_PEAK: usize = 256;
 
@@ -141,6 +145,11 @@ pub struct Studio {
     pub input_name: Option<String>,
     /// Microphone level for the meter, 0.0..=1.0, falling smoothly.
     pub input_level: f32,
+    /// Level of each track (by position in the project) and of the final mix.
+    pub track_levels: Vec<f32>,
+    pub master_level: [f32; 2],
+    /// Kinds of effect in the chain the engine has for each track.
+    fx_sent: HashMap<u64, Vec<EffectKind>>,
     /// Sound id each track's engine instrument was built from.
     loaded: HashMap<u64, String>,
     /// Audio clips the engine has been given, by clip id.
@@ -176,6 +185,9 @@ impl Studio {
             audio_dir: unsaved_audio_dir(),
             input_name: None,
             input_level: 0.0,
+            track_levels: Vec::new(),
+            master_level: [0.0; 2],
+            fx_sent: HashMap::new(),
             loaded: HashMap::new(),
             loaded_audio: HashMap::new(),
             waveforms: HashMap::new(),
@@ -215,6 +227,7 @@ impl Studio {
         self.shared
             .send(EngineCommand::SetProject(Arc::new(self.project.clone())));
         self.shared.send(EngineCommand::SetArmed(self.selected()));
+        self.sync_effects();
         let changed: Vec<(u64, String)> = self
             .project
             .tracks
@@ -241,6 +254,26 @@ impl Studio {
                 instrument: Box::new(instrument),
             });
             self.loaded.insert(track, sound);
+        }
+    }
+
+    /// Rebuild the effect chain of every track whose list of effects changed (knob
+    /// positions travel with the project itself).
+    fn sync_effects(&mut self) {
+        // The engine hands back the chains of deleted tracks by itself.
+        self.fx_sent
+            .retain(|id, _| self.project.track(*id).is_some());
+        for t in &self.project.tracks {
+            let kinds = Chain::kinds(&t.effects);
+            let sent = self.fx_sent.get(&t.id);
+            if sent == Some(&kinds) || (sent.is_none() && kinds.is_empty()) {
+                continue;
+            }
+            self.shared.send(EngineCommand::SetEffects {
+                track: t.id,
+                chain: Box::new(Chain::build(&t.effects, self.sample_rate)),
+            });
+            self.fx_sent.insert(t.id, kinds);
         }
     }
 
@@ -312,6 +345,7 @@ impl Studio {
     pub fn set_sample_rate(&mut self, sr: u32) {
         self.sample_rate = sr;
         self.loaded.clear();
+        self.fx_sent.clear();
         self.sync();
     }
 
@@ -347,10 +381,23 @@ impl Studio {
         self.shared.send(EngineCommand::SetInput(queue));
     }
 
-    /// Advance the level meter one frame.
+    /// Advance the level meters one frame.
     pub fn update_meter(&mut self) {
         let peak = self.meters.take_input().min(1.0);
-        self.input_level = peak.max(self.input_level * 0.85);
+        self.input_level = peak.max(self.input_level * METER_FALL);
+        let tracks = self.project.tracks.len().min(METER_TRACKS);
+        self.track_levels.resize(tracks, 0.0);
+        for (i, level) in self.track_levels.iter_mut().enumerate() {
+            *level = self.meters.take_track(i).max(*level * METER_FALL);
+        }
+        for (level, now) in self.master_level.iter_mut().zip(self.meters.take_master()) {
+            *level = now.max(*level * METER_FALL);
+        }
+    }
+
+    /// True while any meter still shows something (so the UI keeps redrawing).
+    pub fn meters_moving(&self) -> bool {
+        self.master_level.iter().any(|l| *l > 0.001)
     }
 
     /// Swap in a different project (new/open), whose recordings live in `audio_dir`.
@@ -389,6 +436,7 @@ impl Studio {
         self.recording_from = None;
         self.pending.clear();
         self.loaded.clear();
+        self.fx_sent.clear();
         self.loaded_audio.clear();
         self.input_name = None;
         self.sync();
@@ -447,6 +495,7 @@ impl Studio {
             EngineEvent::Retired(old) => drop(old),
             EngineEvent::RetiredInstrument(old) => drop(old),
             EngineEvent::RetiredAudio(old) => drop(old),
+            EngineEvent::RetiredEffects(old) => drop(old),
             EngineEvent::RetiredInput(old) => drop(old),
         }
     }

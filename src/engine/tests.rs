@@ -552,3 +552,165 @@ fn closing_the_microphone_hands_the_queue_back() {
             .any(|e| matches!(e, EngineEvent::RetiredInput(_)))
     );
 }
+
+// ---- Effects, master and meters ----
+
+use crate::project::effects::{Effect, EffectKind};
+
+fn one_second_echo() -> Vec<Effect> {
+    vec![Effect::with(
+        EffectKind::Delay,
+        &[(0, 1000.0), (1, 0.0), (2, 1.0)],
+    )]
+}
+
+#[test]
+fn track_effects_are_heard() {
+    let render = |effects: Vec<Effect>| {
+        let mut r = rig(48_000);
+        let (mut p, ids) = project(1);
+        with_note_at_beat_1(&mut p, ids[0]);
+        p.tracks[0].effects = effects;
+        let chain = fx::Chain::build(&p.tracks[0].effects, 48_000);
+        r.send(EngineCommand::SetProject(Arc::new(p)));
+        r.send(EngineCommand::SetEffects {
+            track: ids[0],
+            chain: Box::new(chain),
+        });
+        r.send(EngineCommand::Play);
+        r.render(120_000)
+    };
+    // The note plays from sample 24 000 to 48 000; its echo arrives a second later.
+    let dry = render(Vec::new());
+    let wet = render(one_second_echo());
+    assert!(peak(&dry[84_000..]) < 1e-3, "note still ringing");
+    assert!(peak(&wet[84_000..96_000]) > 0.01, "no echo");
+    assert_eq!(dry[..48_000], wet[..48_000]);
+}
+
+#[test]
+fn knob_changes_arrive_with_the_project() {
+    let mut r = rig(48_000);
+    let (mut p, ids) = project(1);
+    p.tracks[0].effects = vec![Effect::with(EffectKind::Eq, &[(1, 0.0)])];
+    let chain = fx::Chain::build(&p.tracks[0].effects, 48_000);
+    r.send(EngineCommand::SetProject(Arc::new(p.clone())));
+    r.send(EngineCommand::SetEffects {
+        track: ids[0],
+        chain: Box::new(chain),
+    });
+    r.send(EngineCommand::NoteOn {
+        track: ids[0],
+        pitch: 60,
+        velocity: 100,
+    });
+    let flat = peak(&r.render(24_000)[12_000..]);
+    // Turn the low shelf all the way down: middle C loses level.
+    p.tracks[0].effects[0].set(0, -15.0);
+    p.tracks[0].effects[0].set(1, -15.0);
+    p.tracks[0].effects[0].set(2, 262.0);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    let cut = peak(&r.render(24_000)[12_000..]);
+    assert!(cut < flat * 0.7, "{cut} vs {flat}");
+}
+
+#[test]
+fn chains_come_back_when_replaced_or_their_track_is_deleted() {
+    let retired = |r: &mut Rig| {
+        r.events()
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::RetiredEffects(_)))
+            .count()
+    };
+    let mut r = rig(48_000);
+    let (mut p, ids) = project(1);
+    p.tracks[0].effects = one_second_echo();
+    let build = |p: &Project| Box::new(fx::Chain::build(&p.tracks[0].effects, 48_000));
+    r.send(EngineCommand::SetProject(Arc::new(p.clone())));
+    r.send(EngineCommand::SetEffects {
+        track: ids[0],
+        chain: build(&p),
+    });
+    r.render(64);
+    assert_eq!(retired(&mut r), 0);
+    r.send(EngineCommand::SetEffects {
+        track: ids[0],
+        chain: build(&p),
+    });
+    r.render(64);
+    assert_eq!(retired(&mut r), 1);
+    // A chain for a track that doesn't exist goes straight back.
+    r.send(EngineCommand::SetEffects {
+        track: 999,
+        chain: build(&p),
+    });
+    r.render(64);
+    assert_eq!(retired(&mut r), 1);
+    r.send(EngineCommand::SetProject(Arc::new(Project::default())));
+    r.render(64);
+    assert_eq!(retired(&mut r), 1);
+}
+
+#[test]
+fn master_limiter_stops_a_loud_mix_from_clipping() {
+    let mut r = rig(48_000);
+    let (mut p, ids) = project(8);
+    for t in &mut p.tracks {
+        t.volume = 1.5;
+        t.pan = -1.0;
+    }
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    for id in &ids {
+        r.send(EngineCommand::NoteOn {
+            track: *id,
+            pitch: 60,
+            velocity: 127,
+        });
+    }
+    let out = r.render(24_000);
+    let loudest = peak(&out);
+    assert!(loudest <= fx::dynamics::CEILING + 1e-6, "{loudest}");
+    assert!(
+        loudest > 0.9,
+        "the mix should be pushing the limiter: {loudest}"
+    );
+}
+
+#[test]
+fn master_volume_scales_the_mix() {
+    let level = |volume: f32| {
+        let mut r = rig(48_000);
+        let (mut p, ids) = project(1);
+        p.master_volume = volume;
+        r.send(EngineCommand::SetProject(Arc::new(p)));
+        r.send(EngineCommand::NoteOn {
+            track: ids[0],
+            pitch: 60,
+            velocity: 100,
+        });
+        peak(&r.render(9600))
+    };
+    assert_eq!(level(0.0), 0.0);
+    let (half, full) = (level(0.5), level(1.0));
+    assert!((half * 2.0 - full).abs() < 1e-4, "{half} {full}");
+}
+
+#[test]
+fn meters_report_track_and_master_levels() {
+    let mut r = rig(48_000);
+    let (p, ids) = project(2);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::NoteOn {
+        track: ids[1],
+        pitch: 60,
+        velocity: 100,
+    });
+    let out = r.render(9600);
+    assert_eq!(r.meters.take_track(0), 0.0);
+    assert!(r.meters.take_track(1) > 0.01);
+    let [left, right] = r.meters.take_master();
+    assert!((left - peak(&out)).abs() < 1e-6);
+    assert!(right > 0.01);
+    // Reading a meter resets it.
+    assert_eq!(r.meters.take_master(), [0.0, 0.0]);
+}

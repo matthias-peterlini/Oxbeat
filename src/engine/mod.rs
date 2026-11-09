@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod drums;
+pub mod fx;
 pub mod instrument;
 pub mod sampler;
 pub mod synth;
@@ -11,6 +12,8 @@ pub mod transport;
 use std::sync::Arc;
 
 use commands::{EngineCommand, EngineEnd, EngineEvent, Meters};
+use fx::Chain;
+use fx::dynamics::Limiter;
 use instrument::{Instrument, sound_hash};
 use sampler::SampleData;
 use transport::{beat_to_sample, sample_to_beat};
@@ -56,6 +59,9 @@ pub struct Engine {
     project: Arc<Project>,
     tracks: Vec<TrackState>,
     audio: Vec<(u64, Arc<SampleData>)>,
+    /// Effect chains, by track id.
+    fx: Vec<(u64, Box<Chain>)>,
+    limiter: Limiter,
     playing: bool,
     pos: u64,
     recording: Option<Recording>,
@@ -78,6 +84,8 @@ impl Engine {
             project: Arc::new(Project::default()),
             tracks: Vec::with_capacity(MAX_TRACKS),
             audio: Vec::with_capacity(MAX_AUDIO_CLIPS),
+            fx: Vec::with_capacity(MAX_TRACKS),
+            limiter: Limiter::new(sample_rate as f32),
             playing: false,
             pos: 0,
             recording: None,
@@ -107,6 +115,15 @@ impl Engine {
 
     fn set_project(&mut self, p: Arc<Project>) {
         self.tracks.retain(|t| p.track(t.id).is_some());
+        while let Some(i) = self.fx.iter().position(|(id, _)| p.track(*id).is_none()) {
+            let (_, chain) = self.fx.swap_remove(i);
+            self.send(EngineEvent::RetiredEffects(chain));
+        }
+        for (id, chain) in &mut self.fx {
+            if let Some(t) = p.track(*id) {
+                chain.configure(&t.effects);
+            }
+        }
         let sr = self.sample_rate;
         for track in &p.tracks {
             let Some(sound) = track.sound() else {
@@ -138,6 +155,26 @@ impl Engine {
         }
         let old = std::mem::replace(&mut self.project, p);
         self.send(EngineEvent::Retired(old));
+    }
+
+    fn set_effects(&mut self, track: u64, mut chain: Box<Chain>) {
+        let Some(t) = self.project.track(track) else {
+            self.send(EngineEvent::RetiredEffects(chain));
+            return;
+        };
+        chain.configure(&t.effects);
+        let slot = self.fx.iter().position(|(id, _)| *id == track);
+        let retired = match slot {
+            Some(i) => Some(std::mem::replace(&mut self.fx[i].1, chain)),
+            None if self.fx.len() < MAX_TRACKS => {
+                self.fx.push((track, chain));
+                None
+            }
+            None => Some(chain),
+        };
+        if let Some(old) = retired {
+            self.send(EngineEvent::RetiredEffects(old));
+        }
     }
 
     fn set_audio(&mut self, clip: u64, data: Option<Arc<SampleData>>) {
@@ -212,6 +249,7 @@ impl Engine {
                 self.send(EngineEvent::RetiredInstrument(instrument));
             }
             EngineCommand::SetAudio { clip, data } => self.set_audio(clip, data),
+            EngineCommand::SetEffects { track, chain } => self.set_effects(track, chain),
             EngineCommand::SetInput(input) => {
                 if let Some(old) = std::mem::replace(&mut self.input, input) {
                     self.send(EngineEvent::RetiredInput(old));
@@ -382,7 +420,7 @@ impl Engine {
             }
         }
 
-        for track in &project.tracks {
+        for (index, track) in project.tracks.iter().enumerate() {
             let scratch = &mut self.scratch[..n];
             scratch.fill(0.0);
             let scratch_r = &mut self.scratch_r[..n];
@@ -424,13 +462,20 @@ impl Engine {
                 );
             }
 
+            // Effects run even while muted, so echoes and tails stay in step.
+            if let Some((_, chain)) = self.fx.iter_mut().find(|(id, _)| *id == track.id) {
+                chain.process(scratch, scratch_r);
+            }
+
             let audible = !track.mute && (!any_solo || track.solo);
             if !audible {
                 continue;
             }
             let angle = (track.pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
             let (l, r) = (angle.cos() * track.volume, angle.sin() * track.volume);
+            let mut loudest = 0.0f32;
             for (i, (sl, sr)) in scratch.iter().zip(scratch_r.iter()).enumerate() {
+                loudest = loudest.max((sl * l).abs()).max((sr * r).abs());
                 let frame = &mut out[i * channels..(i + 1) * channels];
                 if channels == 1 {
                     frame[0] += (sl * l + sr * r) * 0.5;
@@ -439,7 +484,22 @@ impl Engine {
                     frame[1] += sr * r;
                 }
             }
+            self.meters.raise_track(index, loudest);
         }
+
+        // Master: volume, then a limiter so a busy mix never clips.
+        let volume = project.master_volume.clamp(0.0, 2.0);
+        let mut peaks = [0.0f32; 2];
+        for frame in out.chunks_exact_mut(channels) {
+            let used = channels.min(2);
+            for x in &mut frame[..used] {
+                *x *= volume;
+            }
+            self.limiter.run(&mut frame[..used]);
+            peaks[0] = peaks[0].max(frame[0].abs());
+            peaks[1] = peaks[1].max(frame[used - 1].abs());
+        }
+        self.meters.raise_master(peaks);
 
         if self.playing {
             self.pos = end;

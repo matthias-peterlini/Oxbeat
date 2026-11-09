@@ -1,5 +1,6 @@
 //! The song: tracks, clips and notes. The UI owns this; the engine reads snapshots of it.
 
+pub mod effects;
 pub mod io;
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,9 @@ pub struct Project {
     pub tempo_bpm: f64,
     pub key: String,
     pub tracks: Vec<Track>,
+    /// Overall loudness, 0.0..=1.5.
+    #[serde(default = "full_volume")]
+    pub master_volume: f32,
     #[serde(default)]
     next_id: u64,
 }
@@ -26,6 +30,7 @@ impl Default for Project {
             tempo_bpm: 120.0,
             key: "C major".into(),
             tracks: Vec::new(),
+            master_volume: 1.0,
             next_id: 1,
         }
     }
@@ -45,6 +50,9 @@ pub struct Track {
     /// Voice tracks: play the microphone through the track while it is selected.
     #[serde(default)]
     pub monitor: bool,
+    /// Effects the track plays through, first to last.
+    #[serde(default)]
+    pub effects: Vec<effects::Effect>,
     pub clips: Vec<Clip>,
 }
 
@@ -59,6 +67,10 @@ pub enum TrackKind {
         #[serde(default = "default_kit")]
         kit: String,
     },
+}
+
+fn full_volume() -> f32 {
+    1.0
 }
 
 fn default_kit() -> String {
@@ -178,6 +190,7 @@ impl Project {
             mute: false,
             solo: false,
             monitor: false,
+            effects: Vec::new(),
             clips: Vec::new(),
         });
         id

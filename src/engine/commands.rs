@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use super::fx::Chain;
 use super::instrument::Instrument;
 use super::sampler::SampleData;
 use crate::project::{Note, Project};
@@ -26,6 +27,12 @@ pub enum EngineCommand {
     SetAudio {
         clip: u64,
         data: Option<Arc<SampleData>>,
+    },
+    /// Replace a track's effects. Built for the track's current list of effects;
+    /// knob changes after that travel in the project.
+    SetEffects {
+        track: u64,
+        chain: Box<Chain>,
     },
     /// Microphone samples (mono, at the engine's sample rate), or `None` when the
     /// microphone is closed.
@@ -69,28 +76,73 @@ pub enum EngineEvent {
     Retired(Arc<Project>),
     /// An instrument the engine no longer needs, same reason.
     RetiredInstrument(Box<Instrument>),
+    /// An effect chain the engine no longer needs, same reason.
+    RetiredEffects(Box<Chain>),
     /// Clip audio the engine no longer needs, same reason.
     RetiredAudio(Arc<SampleData>),
     /// A microphone queue the engine no longer reads, same reason.
     RetiredInput(rtrb::Consumer<f32>),
 }
 
-/// Levels the engine measures for the UI to draw.
-#[derive(Default)]
+/// Tracks that get a level meter (the first ones in the project).
+pub const METER_TRACKS: usize = 64;
+
+/// Levels the engine measures for the UI to draw. Each is the loudest sample since
+/// the UI last looked.
 pub struct Meters {
     input: AtomicU32,
+    master: [AtomicU32; 2],
+    tracks: [AtomicU32; METER_TRACKS],
+}
+
+impl Default for Meters {
+    fn default() -> Self {
+        Self {
+            input: AtomicU32::new(0),
+            master: std::array::from_fn(|_| AtomicU32::new(0)),
+            tracks: std::array::from_fn(|_| AtomicU32::new(0)),
+        }
+    }
+}
+
+fn raise(slot: &AtomicU32, peak: f32) {
+    // Bit patterns of non-negative floats sort like the floats themselves.
+    slot.fetch_max(peak.abs().to_bits(), Ordering::Relaxed);
+}
+
+fn take(slot: &AtomicU32) -> f32 {
+    f32::from_bits(slot.swap(0, Ordering::Relaxed))
 }
 
 impl Meters {
+    /// Left and right level of the final mix.
+    pub fn take_master(&self) -> [f32; 2] {
+        [take(&self.master[0]), take(&self.master[1])]
+    }
+
+    /// Level of the track at `index` in the project, after its fader.
+    pub fn take_track(&self, index: usize) -> f32 {
+        self.tracks.get(index).map_or(0.0, take)
+    }
+
+    pub(super) fn raise_master(&self, peaks: [f32; 2]) {
+        raise(&self.master[0], peaks[0]);
+        raise(&self.master[1], peaks[1]);
+    }
+
+    pub(super) fn raise_track(&self, index: usize, peak: f32) {
+        if let Some(slot) = self.tracks.get(index) {
+            raise(slot, peak);
+        }
+    }
+
     /// Loudest microphone sample since the last call (0.0..=1.0+).
     pub fn take_input(&self) -> f32 {
-        f32::from_bits(self.input.swap(0, Ordering::Relaxed))
+        take(&self.input)
     }
 
     pub(super) fn raise_input(&self, peak: f32) {
-        // Bit patterns of non-negative floats sort like the floats themselves.
-        self.input
-            .fetch_max(peak.abs().to_bits(), Ordering::Relaxed);
+        raise(&self.input, peak);
     }
 }
 

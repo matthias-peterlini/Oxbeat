@@ -229,7 +229,7 @@ const LEVEL_OK: Color32 = Color32::from_rgb(0x34, 0xc3, 0x8f);
 const METER_FLOOR_DB: f32 = -54.0;
 
 /// How far along the meter a level (0.0..=1.0) reaches.
-fn meter_fraction(level: f32) -> f32 {
+pub(super) fn meter_fraction(level: f32) -> f32 {
     if level <= 0.0 {
         return 0.0;
     }
