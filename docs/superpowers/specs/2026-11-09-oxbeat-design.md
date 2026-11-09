@@ -104,7 +104,7 @@ My calls (builder may revise with reason):
   e.g. YIN + correction toward the project key's scale).
 - **Project format:** a folder/bundle containing a JSON (serde) project file plus recorded
   audio; versioned schema.
-- **Sound-pack repo:** separate repo (e.g. `matthias-peterlini/Oxbeat-Sounds`) with an
+- **Sound-pack repo:** separate repo (`matthias-peterlini/Oxbeat-Sounds`) with an
   `index.json` listing packs (name, category, size, license, download URL, checksum); pack
   archives attached as GitHub Release assets (avoids repo file-size limits). App fetches over
   HTTPS, verifies checksum, extracts to the user data dir.
@@ -116,9 +116,8 @@ My calls (builder may revise with reason):
 - **License:** the user decided Oxbeat is **free and open source**. My call on which
   license: **GPL-3.0-or-later**, which keeps forks open and allows LGPL/GPL dependencies
   (e.g. LAME) to be linked statically. Dependencies must be GPL-3.0-compatible.
-- **Sound-pack repo creation:** still to confirm with the user whether Claude creates
-  `matthias-peterlini/Oxbeat-Sounds` or the user does; needed only at the sound-browser
-  milestone.
+- **Sound-pack repo:** created by the user at
+  https://github.com/matthias-peterlini/Oxbeat-Sounds
 
 ## Settled after builder check (my calls)
 
