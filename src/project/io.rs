@@ -70,6 +70,7 @@ mod tests {
                 },
             ],
             audio: None,
+            audio_offset: 0.0,
         });
         p
     }

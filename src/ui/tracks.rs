@@ -11,6 +11,7 @@ use super::theme::{
     self, ACCENT, BG, BORDER, MUTE, RECORD, SURFACE, SURFACE_2, TEXT, TEXT_DIM, TEXT_FAINT, bold,
     font, track_color,
 };
+use crate::project::edit::{MIN_LENGTH, snap};
 use crate::project::{Track, TrackKind};
 
 const ROW_HEIGHT: f32 = 64.0;
@@ -19,6 +20,30 @@ const RULER_HEIGHT: f32 = 28.0;
 const PX_PER_BEAT: f32 = 30.0;
 const MIN_BARS: f64 = 32.0;
 const MONITOR: Color32 = Color32::from_rgb(0x34, 0xc3, 0x8f);
+/// Clips move and stretch in whole beats; holding Shift allows sixteenths.
+const COARSE_GRID: f64 = 1.0;
+const FINE_GRID: f64 = 0.25;
+/// Width of the strip at a clip's right edge that stretches it.
+const TRIM_HANDLE: f32 = 7.0;
+/// Length of a clip made by double-clicking an empty lane.
+const NEW_CLIP_BEATS: f64 = 8.0;
+
+/// What the user asked for while the tracks were being drawn; carried out afterwards.
+#[derive(Default)]
+struct Requests {
+    select_track: Option<u64>,
+    select_clip: Option<u64>,
+    deselect_clip: bool,
+    /// Open this clip in the note editor.
+    edit: Option<u64>,
+    delete: Option<u64>,
+    duplicate: Option<u64>,
+    split: Option<u64>,
+    quantize: Option<u64>,
+    /// Make an empty clip on (track, starting at beat).
+    new_clip: Option<(u64, f64)>,
+    delete_track: Option<u64>,
+}
 
 fn kind_icon(kind: &TrackKind) -> &'static str {
     match kind {
@@ -36,7 +61,8 @@ fn kind_label(track: &Track) -> String {
     }
 }
 
-pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser::Browser) {
+/// Draws the arrangement. Returns true when a clip should open in the note editor.
+pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser::Browser) -> bool {
     if studio.project.tracks.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(
@@ -45,8 +71,9 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
                     .color(TEXT_DIM),
             );
         });
-        return;
+        return false;
     }
+    let mut open_editor = false;
     let end_beat = studio
         .project
         .tracks
@@ -90,8 +117,9 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
             let selected = studio.selected();
             let tempo = studio.project.tempo_bpm;
             let mut changed = false;
-            let mut select = None;
+            let mut req = Requests::default();
             let mut pick_sound = None;
+            let selected_clip = studio.selected_clip;
             for (i, track) in studio.project.tracks.iter_mut().enumerate() {
                 let top = area.top() + RULER_HEIGHT + i as f32 * ROW_HEIGHT;
                 let row = Rect::from_min_size(pos2(area.left(), top), vec2(total.x, ROW_HEIGHT));
@@ -99,8 +127,24 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
                 let is_sel = track.id == selected;
                 let resp = ui.interact(row, ui.scope_id().with(("row", track.id)), Sense::click());
                 if resp.clicked() {
-                    select = Some(track.id);
+                    req.select_track = Some(track.id);
+                    req.deselect_clip = true;
                 }
+                if resp.double_clicked()
+                    && !track.is_audio()
+                    && let Some(p) = resp.interact_pointer_pos()
+                    && p.x > lane_x
+                {
+                    let beat = ((p.x - lane_x) / PX_PER_BEAT) as f64;
+                    req.new_clip = Some((track.id, (beat / 4.0).floor() * 4.0));
+                }
+                let track_id = track.id;
+                resp.context_menu(|ui| {
+                    if ui.button("Delete track").clicked() {
+                        req.delete_track = Some(track_id);
+                        ui.close();
+                    }
+                });
                 if is_sel {
                     ui.painter().rect_filled(
                         Rect::from_min_max(pos2(lane_x, row.top()), row.max),
@@ -114,7 +158,17 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
                 );
                 let header = Rect::from_min_size(row.min, vec2(HEADER_WIDTH, ROW_HEIGHT));
                 changed |= track_header(ui, track, header, color, is_sel, &mut pick_sound);
-                draw_clips(ui, track, lane_x, row, color, &studio.waveforms, tempo);
+                changed |= clips(
+                    ui,
+                    track,
+                    lane_x,
+                    row,
+                    color,
+                    &studio.waveforms,
+                    tempo,
+                    selected_clip,
+                    &mut req,
+                );
                 if let Some((rec_track, from)) = studio.recording_from
                     && rec_track == track.id
                     && studio.recording
@@ -130,8 +184,46 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
                     p.rect_stroke(r, 6, Stroke::new(1.0, RECORD), StrokeKind::Inside);
                 }
             }
-            if let Some(id) = select {
+            if let Some(id) = req.select_track {
                 studio.select(id);
+            }
+            if req.deselect_clip {
+                studio.selected_clip = None;
+            }
+            if let Some(id) = req.select_clip {
+                studio.select_clip(id);
+            }
+            if let Some((track, beat)) = req.new_clip
+                && let Some(id) = studio.project.add_empty_clip(track, beat, NEW_CLIP_BEATS)
+            {
+                changed = true;
+                req.edit = Some(id);
+            }
+            if let Some(id) = req.edit {
+                studio.select_clip(id);
+                open_editor = true;
+            }
+            for (id, action) in [
+                (
+                    req.duplicate,
+                    Studio::duplicate_selected_clip as fn(&mut Studio),
+                ),
+                (req.split, Studio::split_selected_clip),
+                (req.delete, Studio::delete_selected_clip),
+            ] {
+                if let Some(id) = id {
+                    studio.select_clip(id);
+                    action(studio);
+                }
+            }
+            if let Some(id) = req.quantize
+                && let Some(clip) = studio.project.clip_mut(id)
+            {
+                clip.quantize(FINE_GRID);
+                changed = true;
+            }
+            if let Some(id) = req.delete_track {
+                studio.delete_track(id);
             }
             if let Some((id, drums)) = pick_sound {
                 studio.select(id);
@@ -160,6 +252,7 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
                 );
             }
         });
+    open_editor
 }
 
 fn grid(ui: &Ui, lanes: Rect) {
@@ -317,36 +410,135 @@ fn track_header(
     changed
 }
 
-fn draw_clips(
-    ui: &Ui,
-    track: &Track,
+/// Draws a track's clips and lets them be picked, moved, stretched and edited.
+/// Returns true when a clip changed.
+#[allow(clippy::too_many_arguments)]
+fn clips(
+    ui: &mut Ui,
+    track: &mut Track,
     lane_x: f32,
     row: Rect,
     color: Color32,
     waveforms: &HashMap<u64, Arc<Waveform>>,
     tempo: f64,
-) {
-    let painter = ui.painter_at(Rect::from_min_max(pos2(lane_x, row.top()), row.max));
+    selected: Option<u64>,
+    req: &mut Requests,
+) -> bool {
+    let lane = Rect::from_min_max(pos2(lane_x, row.top()), row.max);
     let dim = if track.mute { 0.35 } else { 1.0 };
-    for clip in &track.clips {
+    let grid = if ui.input(|i| i.modifiers.shift) {
+        FINE_GRID
+    } else {
+        COARSE_GRID
+    };
+    let beat_at = |x: f32| ((x - lane_x) / PX_PER_BEAT) as f64;
+    let mut changed = false;
+    for clip in &mut track.clips {
         let x0 = lane_x + clip.start_beat as f32 * PX_PER_BEAT;
         let r = Rect::from_min_size(
             pos2(x0 + 1.0, row.top() + 6.0),
             vec2(
-                clip.length_beats as f32 * PX_PER_BEAT - 2.0,
+                (clip.length_beats as f32 * PX_PER_BEAT - 2.0).max(2.0),
                 ROW_HEIGHT - 12.0,
             ),
         );
-        painter.rect_filled(r, 6, color.gamma_multiply(0.22 * dim));
-        painter.rect_stroke(
+        let id = ui.scope_id().with(("clip", clip.id));
+        let body = ui.interact(r, id, Sense::click_and_drag());
+        let handle = Rect::from_min_max(pos2(r.right() - TRIM_HANDLE, r.top()), r.max);
+        let edge = ui
+            .interact(handle, id.with("edge"), Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+        if body.clicked() || body.drag_started() || edge.drag_started() {
+            req.select_clip = Some(clip.id);
+        }
+        if body.double_clicked() && !clip.is_audio() {
+            req.edit = Some(clip.id);
+        }
+        if body.drag_started()
+            && let Some(p) = body.interact_pointer_pos()
+        {
+            // Remember where on the clip it was grabbed.
+            let grab = beat_at(p.x) - clip.start_beat;
+            ui.data_mut(|d| d.insert_temp(id, grab));
+        }
+        if body.dragged()
+            && let Some(p) = body.interact_pointer_pos()
+        {
+            let grab = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(0.0);
+            let start = snap(beat_at(p.x) - grab, grid).max(0.0);
+            if start != clip.start_beat {
+                clip.start_beat = start;
+                changed = true;
+            }
+        }
+        if edge.dragged()
+            && let Some(p) = edge.interact_pointer_pos()
+        {
+            let end = snap(beat_at(p.x), grid);
+            let length = (end - clip.start_beat).max(grid.max(MIN_LENGTH));
+            if length != clip.length_beats {
+                clip.length_beats = length;
+                changed = true;
+            }
+        }
+        let (clip_id, is_audio) = (clip.id, clip.is_audio());
+        body.context_menu(|ui| {
+            let item = |ui: &mut Ui, label: &str, shortcut: &str| {
+                let clicked = ui
+                    .add(
+                        egui::Button::new(label)
+                            .shortcut_text(shortcut)
+                            .min_size(vec2(190.0, 26.0)),
+                    )
+                    .clicked();
+                if clicked {
+                    ui.close();
+                }
+                clicked
+            };
+            if !is_audio && item(ui, "Edit notes", "Double-click") {
+                req.edit = Some(clip_id);
+            }
+            if item(ui, "Duplicate", "Ctrl+D") {
+                req.duplicate = Some(clip_id);
+            }
+            if item(ui, "Split at playhead", "Ctrl+T") {
+                req.split = Some(clip_id);
+            }
+            if !is_audio && item(ui, "Quantize", "") {
+                req.quantize = Some(clip_id);
+            }
+            ui.separator();
+            if item(ui, "Delete", "Del") {
+                req.delete = Some(clip_id);
+            }
+        });
+
+        let painter = ui.painter_at(lane);
+        let is_selected = selected == Some(clip.id);
+        painter.rect_filled(
             r,
             6,
-            Stroke::new(1.0, color.gamma_multiply(0.7 * dim)),
-            StrokeKind::Inside,
+            color.gamma_multiply(if is_selected { 0.34 } else { 0.22 } * dim),
         );
+        let stroke = if is_selected {
+            Stroke::new(1.5, TEXT)
+        } else {
+            Stroke::new(1.0, color.gamma_multiply(0.7 * dim))
+        };
+        painter.rect_stroke(r, 6, stroke, StrokeKind::Inside);
         if clip.is_audio() {
             if let Some(wave) = waveforms.get(&clip.id) {
-                draw_waveform(&painter, wave, r, tempo, color.gamma_multiply(dim));
+                let clipped = painter.with_clip_rect(r.intersect(lane));
+                draw_waveform(
+                    &clipped,
+                    wave,
+                    r,
+                    clip.audio_offset,
+                    tempo,
+                    color.gamma_multiply(dim),
+                );
             }
             continue;
         }
@@ -356,21 +548,30 @@ fn draw_clips(
         });
         let span = (hi.saturating_sub(lo)).max(12) as f32;
         let inner = r.shrink2(vec2(4.0, 8.0));
+        let notes = painter.with_clip_rect(r.intersect(lane));
         for n in &clip.notes {
             let y = inner.bottom() - (n.pitch.saturating_sub(lo)) as f32 / span * inner.height();
             let x = inner.left() + n.start_beat as f32 * PX_PER_BEAT;
             let w = (n.length_beats as f32 * PX_PER_BEAT).max(3.0);
-            painter.rect_filled(
+            notes.rect_filled(
                 Rect::from_min_size(pos2(x, y - 1.5), vec2(w, 3.0)),
                 1,
                 color.gamma_multiply(dim),
             );
         }
     }
+    changed
 }
 
 /// One vertical line per pixel, as tall as the loudest moment it covers.
-fn draw_waveform(painter: &egui::Painter, wave: &Waveform, r: Rect, tempo: f64, color: Color32) {
+fn draw_waveform(
+    painter: &egui::Painter,
+    wave: &Waveform,
+    r: Rect,
+    offset_seconds: f64,
+    tempo: f64,
+    color: Color32,
+) {
     let visible = r.intersect(painter.clip_rect());
     if visible.width() <= 0.0 {
         return;
@@ -380,7 +581,7 @@ fn draw_waveform(painter: &egui::Painter, wave: &Waveform, r: Rect, tempo: f64, 
     let half = r.height() / 2.0 - 5.0;
     let mut x = visible.left().floor();
     while x < visible.right() {
-        let t = (x - r.left()).max(0.0) as f64 * seconds_per_px;
+        let t = offset_seconds + (x - r.left()).max(0.0) as f64 * seconds_per_px;
         let h = (wave.peak_between(t, t + seconds_per_px) * half).max(0.5);
         painter.line_segment(
             [pos2(x, mid - h), pos2(x, mid + h)],

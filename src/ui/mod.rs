@@ -1,9 +1,11 @@
 //! The Oxbeat window: Focus layout (top bar, tracks, keyboard strip).
 
 mod effects_panel;
+mod history;
 mod icons;
 mod keyboard_strip;
 mod mixer;
+mod piano_roll;
 mod sound_browser;
 pub mod studio;
 mod theme;
@@ -37,6 +39,8 @@ use theme::{BG, BORDER, RECORD, SURFACE};
 enum Bottom {
     /// The keyboard, drum pads or microphone of the selected track.
     Play,
+    /// The notes of the selected clip.
+    Editor,
     Effects,
     Mixer,
 }
@@ -44,6 +48,7 @@ enum Bottom {
 pub struct OxbeatApp {
     studio: Studio,
     bottom: Bottom,
+    editor: piano_roll::Editor,
     audio: Option<AudioOutput>,
     audio_error: Option<String>,
     input: Option<AudioInput>,
@@ -86,6 +91,7 @@ impl OxbeatApp {
         let mut app = Self {
             studio,
             bottom: Bottom::Play,
+            editor: piano_roll::Editor::default(),
             audio,
             audio_error,
             input: None,
@@ -127,6 +133,34 @@ impl OxbeatApp {
         self.studio.sync();
         self.bottom = match what.as_str() {
             "mixer" => Bottom::Mixer,
+            "editor" | "beats" => {
+                // A clip with a few notes, on the keys or the drums.
+                let drums = what == "beats";
+                let p = &mut self.studio.project;
+                let track = p.tracks[if drums { 1 } else { 0 }].id;
+                let pitches: [u8; 6] = if drums {
+                    [36, 42, 38, 42, 36, 38]
+                } else {
+                    [60, 64, 67, 72, 67, 64]
+                };
+                if let Some(clip) = p.add_empty_clip(track, 0.0, 8.0) {
+                    if let Some(c) = p.clip_mut(clip) {
+                        c.notes = pitches
+                            .iter()
+                            .enumerate()
+                            .map(|(i, pitch)| crate::project::Note {
+                                pitch: *pitch,
+                                velocity: 60 + 10 * i as u8,
+                                start_beat: i as f64,
+                                length_beats: if drums { 0.25 } else { 0.75 },
+                            })
+                            .collect();
+                    }
+                    self.studio.select_clip(clip);
+                    self.studio.sync();
+                }
+                Bottom::Editor
+            }
             "effects" => Bottom::Effects,
             _ => Bottom::Play,
         };
@@ -248,6 +282,28 @@ impl OxbeatApp {
         if new {
             self.new_project();
         }
+        if !ctx.egui_wants_keyboard_input() && !self.add_track.open && self.error.is_none() {
+            let (undo, redo, duplicate, split) = ctx.input(|i| {
+                (
+                    command(i, Key::Z) && !i.modifiers.shift,
+                    (command(i, Key::Z) && i.modifiers.shift) || command(i, Key::Y),
+                    command(i, Key::D),
+                    command(i, Key::T),
+                )
+            });
+            if undo {
+                self.studio.undo();
+            }
+            if redo {
+                self.studio.redo();
+            }
+            if duplicate {
+                self.studio.duplicate_selected_clip();
+            }
+            if split {
+                self.studio.split_selected_clip();
+            }
+        }
         // Releases always count, whatever else is going on, so notes never get stuck.
         let (events, focused) =
             ctx.input(|i| (i.events.clone(), i.viewport().focused.unwrap_or(true)));
@@ -292,6 +348,14 @@ impl OxbeatApp {
                     Key::Space => self.studio.play_stop(),
                     Key::R => self.studio.record(),
                     Key::Enter => self.studio.rewind(),
+                    Key::Delete | Key::Backspace => {
+                        // A picked note goes first; otherwise the picked clip.
+                        let note = self.bottom == Bottom::Editor
+                            && self.editor.delete_selected(&mut self.studio);
+                        if !note {
+                            self.studio.delete_selected_clip();
+                        }
+                    }
                     Key::Z => self.octave = (self.octave - 1).max(MIN_OCTAVE),
                     Key::X => self.octave = (self.octave + 1).min(MAX_OCTAVE),
                     _ => {
@@ -433,6 +497,7 @@ impl eframe::App for OxbeatApp {
                         ui.spacing_mut().item_spacing.y = 4.0;
                         for (tab, glyph, tip) in [
                             (Bottom::Play, icons::KEYBOARD_MUSIC, "Play"),
+                            (Bottom::Editor, icons::PENCIL, "Note editor"),
                             (Bottom::Effects, icons::SLIDERS, "Effects"),
                             (Bottom::Mixer, icons::MIXER, "Mixer"),
                         ] {
@@ -452,6 +517,7 @@ impl eframe::App for OxbeatApp {
                             &mut self.mouse_note,
                             &self.keyboards,
                         ),
+                        Bottom::Editor => piano_roll::show(ui, &mut self.studio, &mut self.editor),
                         Bottom::Effects => effects_panel::show(ui, &mut self.studio),
                         Bottom::Mixer => mixer::show(ui, &mut self.studio),
                     });
@@ -461,7 +527,9 @@ impl eframe::App for OxbeatApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG))
             .show(ui, |ui| {
-                tracks::show(ui, &mut self.studio, &mut self.add_track)
+                if tracks::show(ui, &mut self.studio, &mut self.add_track) {
+                    self.bottom = Bottom::Editor;
+                }
             });
 
         sound_browser::show(&ctx, &mut self.studio, &mut self.add_track);

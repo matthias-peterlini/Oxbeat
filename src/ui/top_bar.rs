@@ -154,7 +154,7 @@ fn display(ui: &mut Ui, studio: &mut Studio) {
                             )
                             .on_hover_text("Drag or double-click to change the tempo");
                         if r.changed() {
-                            studio.project.tempo_bpm = tempo.round();
+                            studio.project.set_tempo(tempo.round());
                             studio.sync();
                         }
                         ui.label(egui::RichText::new("BPM").font(font(11.0)).color(TEXT_DIM));
@@ -213,6 +213,24 @@ pub fn show(
             });
             ui.add_space(4.0);
             ui.label(egui::RichText::new(&studio.project.name).font(bold(14.0)));
+            ui.add_space(6.0);
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_enabled_ui(studio.can_undo(), |ui| {
+                if theme::icon_button(ui, icons::UNDO, 28.0, false)
+                    .on_hover_text("Undo  (Ctrl+Z)")
+                    .clicked()
+                {
+                    studio.undo();
+                }
+            });
+            ui.add_enabled_ui(studio.can_redo(), |ui| {
+                if theme::icon_button(ui, icons::REDO, 28.0, false)
+                    .on_hover_text("Redo  (Ctrl+Shift+Z)")
+                    .clicked()
+                {
+                    studio.redo();
+                }
+            });
         });
     });
 

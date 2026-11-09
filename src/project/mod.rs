@@ -1,5 +1,6 @@
 //! The song: tracks, clips and notes. The UI owns this; the engine reads snapshots of it.
 
+pub mod edit;
 pub mod effects;
 pub mod io;
 
@@ -106,6 +107,13 @@ pub struct Clip {
     /// Audio clips: a WAV file in the project's `audio/` folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<String>,
+    /// Audio clips: seconds into the file where the clip starts playing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audio_offset: f64,
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
 }
 
 impl Clip {

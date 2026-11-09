@@ -19,3 +19,6 @@ pub const SLIDERS: &str = "\u{e29a}";
 pub const MIXER: &str = "\u{e162}";
 pub const SPARKLES: &str = "\u{e412}";
 pub const POWER: &str = "\u{e140}";
+pub const PENCIL: &str = "\u{e1f9}";
+pub const UNDO: &str = "\u{e2a1}";
+pub const REDO: &str = "\u{e2a0}";

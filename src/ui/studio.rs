@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use super::history::History;
 use crate::audio::recorder::Recorder;
 use crate::engine::commands::{EngineCommand, EngineEvent, METER_TRACKS, Meters, UiEnd};
 use crate::engine::fx::Chain;
@@ -124,6 +126,9 @@ struct LoadedAudio {
 
 pub struct Studio {
     pub project: Project,
+    history: History,
+    /// The clip picked in the arrangement, if any.
+    pub selected_clip: Option<u64>,
     pub shared: Arc<Shared>,
     pub events: rtrb::Consumer<EngineEvent>,
     meters: Arc<Meters>,
@@ -165,6 +170,8 @@ impl Studio {
     pub fn new(project: Project, link: UiEnd) -> Self {
         let selected = project.tracks.first().map_or(0, |t| t.id);
         let mut s = Self {
+            history: History::new(&project),
+            selected_clip: None,
             project,
             shared: Arc::new(Shared {
                 cmd: Mutex::new(link.commands),
@@ -255,6 +262,95 @@ impl Studio {
             });
             self.loaded.insert(track, sound);
         }
+        if self
+            .selected_clip
+            .is_some_and(|c| self.project.clip(c).is_none())
+        {
+            self.selected_clip = None;
+        }
+        self.history.record(&self.project, Instant::now());
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo() && !self.recording
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo() && !self.recording
+    }
+
+    pub fn undo(&mut self) {
+        if self.can_undo()
+            && let Some(p) = self.history.undo()
+        {
+            self.restore(p);
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if self.can_redo()
+            && let Some(p) = self.history.redo()
+        {
+            self.restore(p);
+        }
+    }
+
+    /// Put back a project from the history.
+    fn restore(&mut self, project: Project) {
+        self.shared.release_all();
+        self.project = project;
+        if self.project.track(self.selected()).is_none() {
+            let first = self.project.tracks.first().map_or(0, |t| t.id);
+            self.shared.selected.store(first, Ordering::Relaxed);
+        }
+        self.sync();
+    }
+
+    /// Pick a clip (and the track it is on).
+    pub fn select_clip(&mut self, clip: u64) {
+        if let Some((track, _)) = self.project.clip(clip) {
+            let track = track.id;
+            self.select(track);
+            self.selected_clip = Some(clip);
+        }
+    }
+
+    pub fn delete_selected_clip(&mut self) {
+        if let Some(clip) = self.selected_clip.take()
+            && self.project.remove_clip(clip)
+        {
+            self.sync();
+        }
+    }
+
+    pub fn duplicate_selected_clip(&mut self) {
+        if let Some(clip) = self.selected_clip
+            && let Some(copy) = self.project.duplicate_clip(clip)
+        {
+            self.selected_clip = Some(copy);
+            self.sync();
+        }
+    }
+
+    /// Cut the selected clip in two at the playhead.
+    pub fn split_selected_clip(&mut self) {
+        if let Some(clip) = self.selected_clip
+            && self.project.split_clip(clip, self.position).is_some()
+        {
+            self.sync();
+        }
+    }
+
+    pub fn delete_track(&mut self, track: u64) {
+        if self.recording || !self.project.remove_track(track) {
+            return;
+        }
+        if self.selected() == track {
+            self.shared.release_all();
+            let first = self.project.tracks.first().map_or(0, |t| t.id);
+            self.shared.selected.store(first, Ordering::Relaxed);
+        }
+        self.sync();
     }
 
     /// Rebuild the effect chain of every track whose list of effects changed (knob
@@ -323,12 +419,16 @@ impl Studio {
             self.loaded_audio
                 .insert(clip, LoadedAudio { file, seconds });
         }
+        // A new clip plays its whole recording; no clip may run past the end of it.
         let beats_per_second = self.project.tempo_bpm / 60.0;
         for clip in self.project.tracks.iter_mut().flat_map(|t| &mut t.clips) {
             if let Some(a) = self.loaded_audio.get(&clip.id)
                 && a.seconds > 0.0
             {
-                clip.length_beats = a.seconds * beats_per_second;
+                let most = (a.seconds - clip.audio_offset).max(0.0) * beats_per_second;
+                if clip.length_beats <= 0.0 || clip.length_beats > most {
+                    clip.length_beats = most;
+                }
             }
         }
     }
@@ -409,6 +509,8 @@ impl Studio {
             self.recorder.cancel();
         }
         self.project = project;
+        self.history.reset(&self.project);
+        self.selected_clip = None;
         self.audio_dir = audio_dir;
         self.pending.clear();
         self.playing = false;
@@ -488,6 +590,7 @@ impl Studio {
                         length_beats,
                         notes,
                         audio: None,
+                        audio_offset: 0.0,
                     });
                     self.sync();
                 }
@@ -523,6 +626,7 @@ impl Studio {
                 length_beats: 0.0,
                 notes: Vec::new(),
                 audio: Some(file),
+                audio_offset: 0.0,
             });
             self.sync();
         }
@@ -548,6 +652,7 @@ impl Studio {
                 length_beats: 0.0,
                 notes: Vec::new(),
                 audio: Some(file),
+                audio_offset: 0.0,
             });
         }
         self.sync();

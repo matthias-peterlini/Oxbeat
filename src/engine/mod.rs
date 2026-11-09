@@ -436,7 +436,10 @@ impl Engine {
                         let clip_start = beat_to_sample(clip.start_beat, tempo, sr);
                         let clip_end =
                             beat_to_sample(clip.start_beat + clip.length_beats, tempo, sr);
-                        mix_clip(data, clip_start, clip_end, start, sr, scratch, scratch_r);
+                        let skip = (clip.audio_offset.max(0.0) * sr as f64) as u64;
+                        mix_clip(
+                            data, clip_start, clip_end, skip, start, sr, scratch, scratch_r,
+                        );
                     }
                 }
                 if track.monitor && track.id == self.armed {
@@ -572,12 +575,15 @@ fn render_notes(
     }
 }
 
-/// Add the part of an audio clip (playing from sample `clip_start` until `clip_end`)
-/// that falls in the block starting at `block_start`.
+/// Add the part of an audio clip (playing from sample `clip_start` until `clip_end`,
+/// beginning `skip` samples into its audio) that falls in the block starting at
+/// `block_start`.
+#[allow(clippy::too_many_arguments)]
 fn mix_clip(
     data: &SampleData,
     clip_start: u64,
     clip_end: u64,
+    skip: u64,
     block_start: u64,
     sr: u32,
     left: &mut [f32],
@@ -592,7 +598,7 @@ fn mix_clip(
     let first = clip_start.saturating_sub(block_start) as usize;
     let last = (clip_end.min(block_end) - block_start) as usize;
     for i in first..last {
-        let local = block_start + i as u64 - clip_start;
+        let local = block_start + i as u64 - clip_start + skip;
         let pos = local as f64 * ratio;
         let idx = pos as usize;
         if idx >= frames {

@@ -77,6 +77,7 @@ fn with_note_at_beat_1(p: &mut Project, track: u64) {
             length_beats: 1.0,
         }],
         audio: None,
+        audio_offset: 0.0,
     });
 }
 
@@ -422,6 +423,7 @@ fn voice_with_clip(at: f64, frames: usize, rate: u32) -> (Project, u64, u64, Arc
         length_beats: 64.0,
         notes: Vec::new(),
         audio: Some("take.wav".into()),
+        audio_offset: 0.0,
     });
     (p, track, clip, data)
 }
