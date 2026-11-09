@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod drums;
 pub mod instrument;
+pub mod sampler;
 pub mod synth;
 pub mod transport;
 

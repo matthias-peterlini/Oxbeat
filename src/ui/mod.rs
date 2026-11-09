@@ -75,7 +75,10 @@ impl OxbeatApp {
             octave: 4,
             bundle: None,
             error: None,
-            add_track: Default::default(),
+            add_track: sound_browser::Browser::new(crate::sounds::packs::PackManager::new({
+                let ctx = cc.egui_ctx.clone();
+                Arc::new(move || ctx.request_repaint())
+            })),
             computer_keys: Vec::new(),
             mouse_note: None,
         };
@@ -355,6 +358,7 @@ impl eframe::App for OxbeatApp {
             });
 
         sound_browser::show(&ctx, &mut self.studio, &mut self.add_track);
+        self.studio.load_errors.append(&mut self.add_track.errors);
         if self.error.is_none() && !self.studio.load_errors.is_empty() {
             self.error = Some(std::mem::take(&mut self.studio.load_errors).join(
                 "

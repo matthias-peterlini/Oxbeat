@@ -89,6 +89,8 @@ pub struct Studio {
     loaded: HashMap<u64, String>,
     /// Sounds that failed to load: (track name, message), for the UI to show.
     pub load_errors: Vec<String>,
+    /// Tracks whose sound failed to load (e.g. a pack not installed yet).
+    failed: std::collections::HashSet<u64>,
 }
 
 impl Studio {
@@ -114,6 +116,7 @@ impl Studio {
             sample_rate: 48_000,
             loaded: HashMap::new(),
             load_errors: Vec::new(),
+            failed: Default::default(),
         };
         s.sync();
         s
@@ -155,8 +158,12 @@ impl Studio {
             .collect();
         for (track, sound) in changed {
             let instrument = match crate::sounds::load(&sound, self.sample_rate) {
-                Ok(i) => i,
+                Ok(i) => {
+                    self.failed.remove(&track);
+                    i
+                }
                 Err(e) => {
+                    self.failed.insert(track);
                     self.load_errors
                         .push(format!("Could not load \"{sound}\": {e}"));
                     Instrument::None
@@ -169,6 +176,14 @@ impl Studio {
             });
             self.loaded.insert(track, sound);
         }
+    }
+
+    /// Try again to load sounds that failed before (after installing a pack).
+    pub fn reload_missing(&mut self) {
+        for t in std::mem::take(&mut self.failed) {
+            self.loaded.remove(&t);
+        }
+        self.sync();
     }
 
     /// The engine now runs at `sr`: rebuild every instrument for it.

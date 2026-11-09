@@ -2,6 +2,7 @@
 //! (samples, SoundFonts); built-in synths and kits are heap-free.
 
 use super::drums::{DrumKit, KITS};
+use super::sampler::Sampler;
 use super::synth::{PRESETS, Synth};
 
 // Variants stay inline (not boxed) so the engine can build built-ins without allocating.
@@ -11,6 +12,14 @@ pub enum Instrument {
     None,
     Synth(Synth),
     Drums(DrumKit),
+    Sampler(Sampler),
+    SoundFont(Box<SoundFontInstrument>),
+}
+
+/// One SoundFont preset on one MIDI channel (channel 10 for drum kits).
+pub struct SoundFontInstrument {
+    pub synth: rustysynth::Synthesizer,
+    pub channel: i32,
 }
 
 impl Instrument {
@@ -39,6 +48,8 @@ impl Instrument {
             Instrument::None => {}
             Instrument::Synth(s) => s.note_on(pitch, velocity),
             Instrument::Drums(d) => d.note_on(pitch, velocity),
+            Instrument::Sampler(s) => s.note_on(pitch, velocity),
+            Instrument::SoundFont(f) => f.synth.note_on(f.channel, pitch as i32, velocity as i32),
         }
     }
 
@@ -47,6 +58,8 @@ impl Instrument {
             Instrument::None => {}
             Instrument::Synth(s) => s.note_off(pitch),
             Instrument::Drums(d) => d.note_off(pitch),
+            Instrument::Sampler(s) => s.note_off(pitch),
+            Instrument::SoundFont(f) => f.synth.note_off(f.channel, pitch as i32),
         }
     }
 
@@ -55,6 +68,8 @@ impl Instrument {
             Instrument::None => {}
             Instrument::Synth(s) => s.all_notes_off(),
             Instrument::Drums(d) => d.all_notes_off(),
+            Instrument::Sampler(s) => s.all_notes_off(),
+            Instrument::SoundFont(f) => f.synth.note_off_all(false),
         }
     }
 
@@ -67,6 +82,8 @@ impl Instrument {
                 right.copy_from_slice(left);
             }
             Instrument::Drums(d) => d.render(left, right),
+            Instrument::Sampler(s) => s.render(left, right),
+            Instrument::SoundFont(f) => f.synth.render(left, right),
         }
     }
 }
