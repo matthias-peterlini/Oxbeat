@@ -1,7 +1,9 @@
 //! The Oxbeat window: Focus layout (top bar, tracks, keyboard strip).
 
+mod icons;
 mod keyboard_strip;
 pub mod studio;
+mod theme;
 mod top_bar;
 mod tracks;
 
@@ -17,33 +19,11 @@ use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE, key_to_pitch, stale_keys};
 use crate::project::io;
 use studio::Studio;
 
-pub const BG: Color32 = Color32::from_rgb(0x16, 0x18, 0x1d);
-pub const PANEL: Color32 = Color32::from_rgb(0x22, 0x25, 0x2c);
-pub const ROW: Color32 = Color32::from_rgb(0x1e, 0x21, 0x28);
-pub const ROW_SELECTED: Color32 = Color32::from_rgb(0x26, 0x2b, 0x36);
-pub const ACCENT: Color32 = Color32::from_rgb(0x4b, 0x8b, 0xe0);
-pub const RECORD: Color32 = Color32::from_rgb(0xd9, 0x43, 0x4f);
-pub const CLIP: Color32 = Color32::from_rgb(0x3f, 0xae, 0x6f);
-pub const LCD: Color32 = Color32::from_rgb(0x0e, 0x10, 0x13);
-pub const LCD_TEXT: Color32 = Color32::from_rgb(0x7f, 0xe0, 0xa8);
-
 const MIDI_RESCAN: Duration = Duration::from_secs(1);
 const KEY_VELOCITY: u8 = 100;
 
-/// Apply Oxbeat's dark look.
-pub fn apply_theme(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.global_style_mut(|style| {
-        let v = &mut style.visuals;
-        v.dark_mode = true;
-        v.panel_fill = PANEL;
-        v.window_fill = PANEL;
-        v.extreme_bg_color = BG;
-        v.selection.bg_fill = ACCENT;
-        v.hyperlink_color = ACCENT;
-        style.spacing.button_padding = egui::vec2(10.0, 5.0);
-    });
-}
+pub use theme::apply as apply_theme;
+use theme::{BG, BORDER, RECORD, SURFACE};
 
 pub struct OxbeatApp {
     studio: Studio,
@@ -247,14 +227,23 @@ impl OxbeatApp {
         let Some(msg) = self.error.clone() else {
             return;
         };
-        let r = egui::Modal::new(egui::Id::unique("error")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.heading("Something went wrong");
-            ui.add_space(8.0);
-            ui.label(msg);
-            ui.add_space(12.0);
-            ui.button("OK").clicked()
-        });
+        let r = egui::Modal::new(egui::Id::unique("error"))
+            .frame(
+                egui::Frame::window(&ctx.global_style())
+                    .inner_margin(24)
+                    .corner_radius(12),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(egui::RichText::new("Something went wrong").font(theme::bold(17.0)));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(msg).color(theme::TEXT_DIM));
+                ui.add_space(18.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::primary_button(ui, None, "OK").clicked()
+                })
+                .inner
+            });
         if r.inner || r.should_close() {
             self.error = None;
         }
@@ -286,7 +275,11 @@ impl eframe::App for OxbeatApp {
 
         if let Some(err) = self.audio_error.clone() {
             egui::Panel::top("audio-banner")
-                .frame(egui::Frame::NONE.fill(RECORD).inner_margin(6.0))
+                .frame(
+                    egui::Frame::NONE
+                        .fill(RECORD)
+                        .inner_margin(egui::Margin::symmetric(16, 8)),
+                )
                 .show(ui, |ui| {
                     let text = format!("{err} — click to retry");
                     if ui
@@ -303,7 +296,13 @@ impl eframe::App for OxbeatApp {
 
         let mut action = top_bar::Action::None;
         egui::Panel::top("top-bar")
-            .frame(egui::Frame::NONE.fill(PANEL).inner_margin(8.0))
+            .exact_size(top_bar::HEIGHT + 1.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(SURFACE)
+                    .inner_margin(egui::Margin::symmetric(12, 0))
+                    .stroke(egui::Stroke::new(1.0, BORDER)),
+            )
             .show(ui, |ui| {
                 action = top_bar::show(ui, &mut self.studio, &mut self.add_track);
             });
@@ -315,7 +314,17 @@ impl eframe::App for OxbeatApp {
         }
 
         egui::Panel::bottom("keyboard-strip")
-            .frame(egui::Frame::NONE.fill(PANEL).inner_margin(8.0))
+            .frame(
+                egui::Frame::NONE
+                    .fill(SURFACE)
+                    .inner_margin(egui::Margin {
+                        left: 16,
+                        right: 16,
+                        top: 10,
+                        bottom: 14,
+                    })
+                    .stroke(egui::Stroke::new(1.0, BORDER)),
+            )
             .show(ui, |ui| {
                 keyboard_strip::show(
                     ui,

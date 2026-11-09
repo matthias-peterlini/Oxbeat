@@ -249,12 +249,13 @@ impl Studio {
     }
 }
 
-/// "bar.beat" for the LCD, 4/4: beat 0 → "001.1", beat 5 → "002.2".
-pub fn format_position(beat: f64) -> String {
+/// 1-based (bar, beat in bar) for the display, 4/4: beat 0 → (1, 1), beat 5 → (2, 2).
+pub fn bar_and_beat(beat: f64) -> (u64, u64) {
     let beat = beat.max(0.0);
-    let bar = (beat / 4.0).floor() as u64 + 1;
-    let in_bar = (beat % 4.0).floor() as u64 + 1;
-    format!("{bar:03}.{in_bar}")
+    (
+        (beat / 4.0).floor() as u64 + 1,
+        (beat % 4.0).floor() as u64 + 1,
+    )
 }
 
 #[cfg(test)]
@@ -271,11 +272,12 @@ mod tests {
     }
 
     #[test]
-    fn formats_position() {
-        assert_eq!(format_position(0.0), "001.1");
-        assert_eq!(format_position(5.0), "002.2");
-        assert_eq!(format_position(3.99), "001.4");
-        assert_eq!(format_position(400.0), "101.1");
+    fn splits_bar_and_beat() {
+        assert_eq!(bar_and_beat(0.0), (1, 1));
+        assert_eq!(bar_and_beat(5.0), (2, 2));
+        assert_eq!(bar_and_beat(3.99), (1, 4));
+        assert_eq!(bar_and_beat(400.0), (101, 1));
+        assert_eq!(bar_and_beat(-2.0), (1, 1));
     }
 
     #[test]
