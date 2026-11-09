@@ -13,7 +13,7 @@ use egui::{Color32, Key};
 
 use crate::audio::output::{self, AudioOutput};
 use crate::midi::input::{MidiInputs, MidiMsg};
-use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE, key_to_pitch};
+use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE, key_to_pitch, stale_keys};
 use crate::project::io;
 use studio::Studio;
 
@@ -184,10 +184,31 @@ impl OxbeatApp {
         if new {
             self.new_project();
         }
+        // Releases always count, whatever else is going on, so notes never get stuck.
+        let (events, focused) =
+            ctx.input(|i| (i.events.clone(), i.viewport().focused.unwrap_or(true)));
+        for e in &events {
+            if let egui::Event::Key {
+                key,
+                pressed: false,
+                ..
+            } = e
+                && let Some(i) = self.computer_keys.iter().position(|(k, _)| k == key)
+            {
+                let (_, p) = self.computer_keys.remove(i);
+                self.studio.shared.note_off(p);
+            }
+        }
+        // Key-ups can go missing (focus loss, file dialogs): release anything not down.
+        let stale = ctx.input(|i| stale_keys(&self.computer_keys, |k| i.key_down(k), focused));
+        for i in stale.into_iter().rev() {
+            let (_, p) = self.computer_keys.remove(i);
+            self.studio.shared.note_off(p);
+        }
+
         if ctx.egui_wants_keyboard_input() || self.add_track.open || self.error.is_some() {
             return;
         }
-        let events = ctx.input(|i| i.events.clone());
         for e in events {
             let egui::Event::Key {
                 key,
@@ -218,11 +239,6 @@ impl OxbeatApp {
                         }
                     }
                 }
-            } else if !pressed
-                && let Some(i) = self.computer_keys.iter().position(|(k, _)| *k == key)
-            {
-                let (_, p) = self.computer_keys.remove(i);
-                self.studio.shared.note_off(p);
             }
         }
     }

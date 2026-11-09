@@ -300,3 +300,104 @@ fn retired_projects_are_handed_back() {
             .any(|e| matches!(e, EngineEvent::Retired(_)))
     );
 }
+
+#[test]
+fn zero_length_note_releases() {
+    let mut r = rig(48_000);
+    let (mut p, ids) = project(1);
+    with_note_at_beat_1(&mut p, ids[0]);
+    p.tracks[0].clips[0].notes[0].length_beats = 0.0;
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::Play);
+    r.render(24_000 + 48_000);
+    assert_eq!(peak(&r.render(512)), 0.0);
+}
+
+#[test]
+fn same_block_tap_records_positive_length() {
+    let mut r = rig(48_000);
+    let (p, ids) = project(1);
+    let t = ids[0];
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::Record { track: t });
+    r.send(EngineCommand::NoteOn {
+        track: t,
+        pitch: 60,
+        velocity: 100,
+    });
+    r.send(EngineCommand::NoteOff {
+        track: t,
+        pitch: 60,
+    });
+    r.render(512);
+    r.send(EngineCommand::Stop);
+    r.render(512);
+    let (notes, _) = recorded(r.events());
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].length_beats > 0.0);
+}
+
+#[test]
+fn locate_ignored_while_recording() {
+    let mut r = rig(48_000);
+    let (p, ids) = project(1);
+    let t = ids[0];
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::Record { track: t });
+    r.render(48_000);
+    r.send(EngineCommand::NoteOn {
+        track: t,
+        pitch: 60,
+        velocity: 100,
+    });
+    r.send(EngineCommand::Locate(0.0));
+    r.render(24_000);
+    r.send(EngineCommand::Stop);
+    r.render(512);
+    let (notes, _) = recorded(r.events());
+    assert!(
+        notes
+            .iter()
+            .all(|n| n.start_beat >= 0.0 && n.length_beats > 0.0)
+    );
+    assert!((notes[0].start_beat - 2.0).abs() < 0.05);
+}
+
+#[test]
+fn tempo_change_keeps_beat_position() {
+    let mut r = rig(48_000);
+    let (mut p, _) = project(1);
+    r.send(EngineCommand::SetProject(Arc::new(p.clone())));
+    r.send(EngineCommand::Locate(16.0));
+    r.render(64);
+    p.tempo_bpm = 60.0;
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.render(64);
+    r.events();
+    r.send(EngineCommand::Stop);
+    r.render(64);
+    let pos = r
+        .events()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            EngineEvent::Position(b) => Some(b),
+            _ => None,
+        })
+        .unwrap();
+    assert!((pos - 16.0).abs() < 1e-6, "playhead at {pos}");
+}
+
+#[test]
+fn tempo_change_releases_sounding_clip_notes() {
+    let mut r = rig(48_000);
+    let (mut p, ids) = project(1);
+    with_note_at_beat_1(&mut p, ids[0]);
+    r.send(EngineCommand::SetProject(Arc::new(p.clone())));
+    r.send(EngineCommand::Play);
+    r.render(30_000); // note sounding (beat 1.25)
+    p.tempo_bpm = 240.0;
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.render(48_000);
+    assert_eq!(peak(&r.render(512)), 0.0);
+}

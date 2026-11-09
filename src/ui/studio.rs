@@ -80,6 +80,8 @@ pub struct Studio {
     pub playing: bool,
     pub recording: bool,
     pending: Vec<(u64, Note)>,
+    /// The engine is still finishing a take from a project we replaced; ignore it.
+    discard_take: bool,
 }
 
 impl Studio {
@@ -101,6 +103,7 @@ impl Studio {
             playing: false,
             recording: false,
             pending: Vec::new(),
+            discard_take: false,
         };
         s.sync();
         s
@@ -133,6 +136,7 @@ impl Studio {
 
     /// Swap in a different project (new/open).
     pub fn replace_project(&mut self, project: Project) {
+        self.discard_take = self.recording;
         self.shared.send(EngineCommand::Stop);
         self.shared.release_all();
         self.project = project;
@@ -170,6 +174,8 @@ impl Studio {
     pub fn apply_event(&mut self, e: EngineEvent) {
         match e {
             EngineEvent::Position(b) => self.position = b,
+            EngineEvent::RecordedNote { .. } if self.discard_take => {}
+            EngineEvent::RecordFinished { .. } if self.discard_take => self.discard_take = false,
             EngineEvent::RecordedNote { track, note } => self.pending.push((track, note)),
             EngineEvent::RecordFinished {
                 track,
@@ -235,6 +241,9 @@ impl Studio {
     }
 
     pub fn locate(&mut self, beat: f64) {
+        if self.recording {
+            return;
+        }
         self.shared.send(EngineCommand::Locate(beat.max(0.0)));
         self.position = beat.max(0.0);
     }
@@ -324,6 +333,38 @@ mod tests {
             }
             _ => panic!("expected NoteOn"),
         }
+    }
+
+    #[test]
+    fn replacing_project_mid_take_drops_old_take() {
+        let (mut s, _, _) = studio();
+        s.record();
+        s.replace_project(Studio::starter_project());
+        let t = s.selected();
+        s.apply_event(EngineEvent::RecordedNote {
+            track: t,
+            note: Note {
+                pitch: 60,
+                velocity: 100,
+                start_beat: 0.0,
+                length_beats: 1.0,
+            },
+        });
+        s.apply_event(EngineEvent::RecordFinished {
+            track: t,
+            start_beat: 0.0,
+            length_beats: 4.0,
+        });
+        assert!(s.project.track(t).unwrap().clips.is_empty());
+    }
+
+    #[test]
+    fn locate_ignored_while_recording() {
+        let (mut s, _, _) = studio();
+        s.position = 3.0;
+        s.record();
+        s.locate(0.0);
+        assert_eq!(s.position, 3.0);
     }
 
     #[test]

@@ -17,6 +17,8 @@ use crate::project::{Note, Project, TrackKind};
 const CHUNK: usize = 512;
 const MAX_TRACKS: usize = 256;
 const BEATS_PER_BAR: f64 = 4.0;
+/// Shortest recorded note (a tap within one audio callback).
+const MIN_NOTE_BEATS: f64 = 1.0 / 128.0;
 
 struct TrackState {
     id: u64,
@@ -106,6 +108,13 @@ impl Engine {
                 });
             }
         }
+        if p.tempo_bpm != self.project.tempo_bpm && p.tempo_bpm > 0.0 {
+            // Keep the playhead on the same beat; scheduled note-offs moved, so release
+            // everything that is sounding rather than leave notes stuck.
+            let beat = self.beat();
+            self.pos = beat_to_sample(beat, p.tempo_bpm, self.sample_rate);
+            self.all_off();
+        }
         let old = std::mem::replace(&mut self.project, p);
         self.send(EngineEvent::Retired(old));
     }
@@ -127,7 +136,7 @@ impl Engine {
                             pitch: pitch as u8,
                             velocity: *velocity,
                             start_beat: *start,
-                            length_beats: beat - start,
+                            length_beats: (beat - start).max(MIN_NOTE_BEATS),
                         },
                     });
                 }
@@ -176,7 +185,7 @@ impl Engine {
                         pitch,
                         velocity,
                         start_beat: start,
-                        length_beats: beat - start,
+                        length_beats: (beat - start).max(MIN_NOTE_BEATS),
                     });
                 }
                 if let Some(note) = finished {
@@ -204,7 +213,7 @@ impl Engine {
                                 pitch: pitch as u8,
                                 velocity: *velocity,
                                 start_beat: *start,
-                                length_beats: beat - start,
+                                length_beats: (beat - start).max(MIN_NOTE_BEATS),
                             },
                         });
                     }
@@ -228,6 +237,10 @@ impl Engine {
                 self.playing = true;
             }
             EngineCommand::Locate(beat) => {
+                // Jumping mid-take would corrupt the recording.
+                if self.recording.is_some() {
+                    return;
+                }
                 self.all_off();
                 self.pos = beat_to_sample(beat.max(0.0), self.project.tempo_bpm, self.sample_rate);
                 let b = self.beat();
@@ -286,7 +299,10 @@ impl Engine {
                             for note in &clip.notes {
                                 let on_beat = clip.start_beat + note.start_beat;
                                 let on = beat_to_sample(on_beat, tempo, sr);
-                                let off = beat_to_sample(on_beat + note.length_beats, tempo, sr);
+                                // A note always lasts at least one sample, or it would never
+                                // be switched off.
+                                let off = beat_to_sample(on_beat + note.length_beats, tempo, sr)
+                                    .max(on + 1);
                                 if pass_on {
                                     if on == cur {
                                         state.synth.note_on(note.pitch, note.velocity);
