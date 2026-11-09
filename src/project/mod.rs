@@ -42,6 +42,9 @@ pub struct Track {
     pub pan: f32,
     pub mute: bool,
     pub solo: bool,
+    /// Voice tracks: play the microphone through the track while it is selected.
+    #[serde(default)]
+    pub monitor: bool,
     pub clips: Vec<Clip>,
 }
 
@@ -75,14 +78,28 @@ impl Track {
     pub fn is_drums(&self) -> bool {
         matches!(self.kind, TrackKind::Drums { .. })
     }
+
+    pub fn is_audio(&self) -> bool {
+        matches!(self.kind, TrackKind::Audio)
+    }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Clip {
     pub id: u64,
     pub start_beat: f64,
     pub length_beats: f64,
+    #[serde(default)]
     pub notes: Vec<Note>,
+    /// Audio clips: a WAV file in the project's `audio/` folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
+}
+
+impl Clip {
+    pub fn is_audio(&self) -> bool {
+        self.audio.is_some()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -127,6 +144,29 @@ impl Project {
         )
     }
 
+    /// A track for singing or playing a real instrument into the microphone.
+    pub fn add_voice_track(&mut self) -> u64 {
+        let n = self.tracks.iter().filter(|t| t.is_audio()).count();
+        let name = if n == 0 {
+            "Voice".to_string()
+        } else {
+            format!("Voice {}", n + 1)
+        };
+        let id = self.add_track(&name, TrackKind::Audio);
+        if let Some(t) = self.track_mut(id) {
+            t.monitor = true;
+        }
+        id
+    }
+
+    /// Audio files the project refers to.
+    pub fn audio_files(&self) -> impl Iterator<Item = &str> {
+        self.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter_map(|c| c.audio.as_deref())
+    }
+
     pub fn add_track(&mut self, name: &str, kind: TrackKind) -> u64 {
         let id = self.new_id();
         self.tracks.push(Track {
@@ -137,6 +177,7 @@ impl Project {
             pan: 0.0,
             mute: false,
             solo: false,
+            monitor: false,
             clips: Vec::new(),
         });
         id
@@ -188,6 +229,30 @@ mod tests {
         assert!(t.is_drums());
         assert_eq!(t.sound(), Some("808 Kit"));
         assert_eq!(t.name, "Drums");
+    }
+
+    #[test]
+    fn voice_tracks_are_numbered_and_monitored() {
+        let mut p = Project::default();
+        let a = p.add_voice_track();
+        let b = p.add_voice_track();
+        assert_eq!(p.track(a).unwrap().name, "Voice");
+        assert_eq!(p.track(b).unwrap().name, "Voice 2");
+        assert!(p.track(a).unwrap().is_audio() && p.track(a).unwrap().monitor);
+        assert_eq!(p.track(a).unwrap().sound(), None);
+    }
+
+    #[test]
+    fn old_clips_load_without_audio_field() {
+        let c: Clip =
+            serde_json::from_str(r#"{"id":1,"start_beat":0.0,"length_beats":4.0,"notes":[]}"#)
+                .unwrap();
+        assert!(!c.is_audio());
+        let a: Clip = serde_json::from_str(
+            r#"{"id":2,"start_beat":0.0,"length_beats":4.0,"audio":"take-2.wav"}"#,
+        )
+        .unwrap();
+        assert_eq!(a.audio.as_deref(), Some("take-2.wav"));
     }
 
     #[test]

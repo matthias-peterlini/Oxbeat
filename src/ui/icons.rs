@@ -13,3 +13,5 @@ pub const FOLDER_OPEN: &str = "\u{e247}";
 pub const SAVE: &str = "\u{e14d}";
 pub const FILE_PLUS: &str = "\u{e0c9}";
 pub const AUDIO_LINES: &str = "\u{e55a}";
+pub const HEADPHONES: &str = "\u{e0f1}";
+pub const IMPORT: &str = "\u{e22f}";

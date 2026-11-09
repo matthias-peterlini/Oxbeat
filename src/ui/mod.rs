@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, Key};
 
+use crate::audio::input::{self, AudioInput};
 use crate::audio::output::{self, AudioOutput};
+use crate::engine::commands::link;
 use crate::midi::input::{MidiInputs, MidiMsg};
 use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE, key_to_pad, key_to_pitch, stale_keys};
 use crate::project::io;
@@ -22,6 +24,8 @@ use studio::Studio;
 
 const MIDI_RESCAN: Duration = Duration::from_secs(1);
 const KEY_VELOCITY: u8 = 100;
+/// How often to look for a microphone while a voice track is waiting for one.
+const INPUT_RETRY: Duration = Duration::from_secs(2);
 
 pub use theme::apply as apply_theme;
 use theme::{BG, BORDER, RECORD, SURFACE};
@@ -30,6 +34,8 @@ pub struct OxbeatApp {
     studio: Studio,
     audio: Option<AudioOutput>,
     audio_error: Option<String>,
+    input: Option<AudioInput>,
+    last_input_try: Instant,
     midi: MidiInputs,
     last_rescan: Instant,
     keyboards: Vec<String>,
@@ -46,9 +52,9 @@ pub struct OxbeatApp {
 impl OxbeatApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
-        let ((cmd_tx, cmd_rx), (evt_tx, evt_rx)) = studio::queues();
-        let mut studio = Studio::new(Studio::starter_project(), cmd_tx, evt_rx);
-        let (audio, audio_error) = match output::start(cmd_rx, evt_tx) {
+        let (ui_end, engine_end) = link();
+        let mut studio = Studio::new(Studio::starter_project(), ui_end);
+        let (audio, audio_error) = match output::start(engine_end) {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(e.to_string())),
         };
@@ -69,6 +75,8 @@ impl OxbeatApp {
             studio,
             audio,
             audio_error,
+            input: None,
+            last_input_try: Instant::now() - INPUT_RETRY,
             midi,
             last_rescan: Instant::now() - MIDI_RESCAN,
             keyboards: Vec::new(),
@@ -98,9 +106,11 @@ impl OxbeatApp {
 
     fn retry_audio(&mut self) {
         self.audio = None;
-        let ((cmd_tx, cmd_rx), (evt_tx, evt_rx)) = studio::queues();
-        self.studio.reconnect(cmd_tx, evt_rx);
-        match output::start(cmd_rx, evt_tx) {
+        // The microphone is reopened for the new engine (and its sample rate).
+        self.input = None;
+        let (ui_end, engine_end) = link();
+        self.studio.reconnect(ui_end);
+        match output::start(engine_end) {
             Ok(a) => {
                 self.studio.set_sample_rate(a.sample_rate());
                 self.audio = Some(a);
@@ -110,9 +120,35 @@ impl OxbeatApp {
         }
     }
 
+    /// Keep the microphone open exactly while the project has a voice track.
+    fn manage_input(&mut self) {
+        if self.input.as_ref().is_some_and(|i| i.has_failed()) {
+            self.input = None;
+            self.studio.set_input(None);
+        }
+        let wanted = self.studio.needs_input() && self.audio.is_some();
+        if !wanted {
+            if self.input.take().is_some() {
+                self.studio.set_input(None);
+            }
+            return;
+        }
+        if self.input.is_some() || self.last_input_try.elapsed() < INPUT_RETRY {
+            return;
+        }
+        self.last_input_try = Instant::now();
+        // Failing quietly: the voice strip says no microphone was found, and pressing
+        // record explains it.
+        if let Ok((mic, queue)) = input::start(self.studio.sample_rate) {
+            self.studio.set_input(Some((mic.name().to_string(), queue)));
+            self.input = Some(mic);
+        }
+    }
+
     fn new_project(&mut self) {
         self.bundle = None;
-        self.studio.replace_project(Studio::starter_project());
+        self.studio
+            .replace_project(Studio::starter_project(), studio::unsaved_audio_dir());
     }
 
     fn open_project(&mut self) {
@@ -124,7 +160,7 @@ impl OxbeatApp {
         };
         match io::load(&dir) {
             Ok(p) => {
-                self.studio.replace_project(p);
+                self.studio.replace_project(p, dir.join(io::AUDIO_DIR));
                 self.bundle = Some(dir);
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -151,7 +187,11 @@ impl OxbeatApp {
                 path
             }
         };
-        match io::save(&self.studio.project, &dir) {
+        let saved = self
+            .studio
+            .move_audio_to(&dir.join(io::AUDIO_DIR))
+            .and_then(|()| io::save(&self.studio.project, &dir).map_err(|e| e.to_string()));
+        match saved {
             Ok(()) => self.bundle = Some(dir),
             Err(e) => self.error = Some(format!("Could not save: {e}")),
         }
@@ -269,6 +309,8 @@ impl OxbeatApp {
 impl eframe::App for OxbeatApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.studio.drain_events();
+        self.manage_input();
+        self.studio.update_meter();
         if self.last_rescan.elapsed() >= MIDI_RESCAN {
             self.rescan_midi();
         }
@@ -279,6 +321,9 @@ impl eframe::App for OxbeatApp {
         // Keep the playhead moving and keep checking for keyboards.
         let next = if self.studio.playing {
             Duration::from_millis(16)
+        } else if self.input.is_some() && self.studio.voice_selected() {
+            // Keep the level meter alive.
+            Duration::from_millis(33)
         } else {
             MIDI_RESCAN
         };
@@ -344,7 +389,7 @@ impl eframe::App for OxbeatApp {
             .show(ui, |ui| {
                 keyboard_strip::show(
                     ui,
-                    &self.studio,
+                    &mut self.studio,
                     &mut self.octave,
                     &mut self.mouse_note,
                     &self.keyboards,

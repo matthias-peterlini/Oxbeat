@@ -199,6 +199,21 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, size: f32, active: bool) -> Respons
 
 /// A small lettered toggle ("M", "S") used in track headers.
 pub fn toggle_chip(ui: &mut Ui, label: &str, on: &mut bool, on_color: Color32) -> Response {
+    toggle_chip_with(ui, label, bold(11.0), on, on_color)
+}
+
+/// Like `toggle_chip`, with an icon glyph instead of a letter.
+pub fn icon_chip(ui: &mut Ui, glyph: &str, on: &mut bool, on_color: Color32) -> Response {
+    toggle_chip_with(ui, glyph, icon(12.0), on, on_color)
+}
+
+fn toggle_chip_with(
+    ui: &mut Ui,
+    label: &str,
+    font: FontId,
+    on: &mut bool,
+    on_color: Color32,
+) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 20.0), Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -215,7 +230,7 @@ pub fn toggle_chip(ui: &mut Ui, label: &str, on: &mut bool, on_color: Color32) -
         rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        bold(11.0),
+        font,
         text,
     );
     resp

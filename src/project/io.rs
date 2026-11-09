@@ -1,10 +1,13 @@
-//! Save/load a project bundle: a folder `<Name>.oxbeat/` containing `project.json`.
+//! Save/load a project bundle: a folder `<Name>.oxbeat/` containing `project.json`
+//! and an `audio/` folder with its recordings.
 
 use std::path::Path;
 
 use super::{Project, SCHEMA_VERSION};
 
 pub const PROJECT_FILE: &str = "project.json";
+/// Folder inside the bundle that holds recorded and imported audio.
+pub const AUDIO_DIR: &str = "audio";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -66,6 +69,7 @@ mod tests {
                     length_beats: 0.5,
                 },
             ],
+            audio: None,
         });
         p
     }

@@ -20,7 +20,7 @@ fn is_black(semitone: u8) -> bool {
 
 pub fn show(
     ui: &mut Ui,
-    studio: &Studio,
+    studio: &mut Studio,
     octave: &mut i8,
     mouse_note: &mut Option<u8>,
     keyboards: &[String],
@@ -28,6 +28,10 @@ pub fn show(
     let track = studio.project.track(studio.selected());
     let name = track.map_or("No track selected".to_string(), |t| t.name.clone());
     let drums = track.is_some_and(|t| t.is_drums());
+    if track.is_some_and(|t| t.is_audio()) {
+        voice_strip(ui, studio, &name);
+        return;
+    }
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(if drums {
@@ -218,4 +222,108 @@ fn drum_pads(ui: &mut Ui, studio: &Studio, mouse_note: &mut Option<u8>) {
         }
     }
     play_mouse(studio, mouse_note, hit);
+}
+
+const LEVEL_OK: Color32 = Color32::from_rgb(0x34, 0xc3, 0x8f);
+/// Quietest level the meter shows.
+const METER_FLOOR_DB: f32 = -54.0;
+
+/// How far along the meter a level (0.0..=1.0) reaches.
+fn meter_fraction(level: f32) -> f32 {
+    if level <= 0.0 {
+        return 0.0;
+    }
+    ((20.0 * level.log10() - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+/// The strip for a voice track: which microphone is in use and how loud it is.
+fn voice_strip(ui: &mut Ui, studio: &mut Studio, name: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(icons::MIC)
+                .font(theme::icon(16.0))
+                .color(ACCENT),
+        );
+        ui.label(egui::RichText::new(name).font(bold(13.5)));
+        theme::vsep(ui, 14.0);
+        match &studio.input_name {
+            Some(mic) => {
+                let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, LEVEL_OK);
+                ui.label(egui::RichText::new(mic).color(TEXT_DIM));
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new("No microphone found. Plug one in to record.")
+                        .color(TEXT_DIM),
+                );
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let label = theme::icon_text(icons::IMPORT, "Import audio", 13.0, TEXT_DIM);
+            if ui
+                .add(egui::Button::new(label).frame(false))
+                .on_hover_text("Add a WAV, MP3, FLAC or OGG file at the playhead")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_title("Import audio")
+                    .add_filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"])
+                    .pick_file()
+                && let Err(e) = studio.import_audio(&path)
+            {
+                studio
+                    .load_errors
+                    .push(format!("Could not import that file: {e}"));
+            }
+        });
+    });
+    ui.add_space(6.0);
+
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, KEY_HEIGHT), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 8, theme::SURFACE_2);
+    let bar = Rect::from_min_size(rect.min + vec2(20.0, 24.0), vec2(rect.width() - 40.0, 10.0));
+    p.rect_filled(bar, 5, BG);
+    let fraction = meter_fraction(studio.input_level);
+    if fraction > 0.0 {
+        let color = if studio.input_level >= 0.98 {
+            theme::RECORD
+        } else if fraction > 0.85 {
+            theme::MUTE
+        } else {
+            LEVEL_OK
+        };
+        let fill = Rect::from_min_size(bar.min, vec2(bar.width() * fraction, bar.height()));
+        p.rect_filled(fill, 5, color);
+    }
+    let hint = if studio.recording {
+        "Recording… press R or Space to stop"
+    } else if studio.input_name.is_some() {
+        "Press R to record. Wear headphones while the monitor is on."
+    } else {
+        "Voice tracks record from your microphone"
+    };
+    p.text(
+        pos2(rect.center().x, bar.bottom() + 20.0),
+        Align2::CENTER_CENTER,
+        hint,
+        font(12.0),
+        if studio.recording { TEXT } else { TEXT_FAINT },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meter_is_logarithmic() {
+        assert_eq!(meter_fraction(0.0), 0.0);
+        assert_eq!(meter_fraction(1.0), 1.0);
+        assert_eq!(meter_fraction(0.001), 0.0);
+        let half = meter_fraction(0.5);
+        assert!(half > 0.85 && half < 0.92, "{half}");
+    }
 }

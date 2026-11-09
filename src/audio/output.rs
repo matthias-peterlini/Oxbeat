@@ -7,7 +7,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, SupportedBufferSize};
 
 use crate::engine::Engine;
-use crate::engine::commands::{EngineCommand, EngineEvent};
+use crate::engine::commands::EngineEnd;
 
 /// Requested buffer: 256 frames ≈ 5 ms at 48 kHz.
 const PREFERRED_FRAMES: u32 = 256;
@@ -40,10 +40,7 @@ impl AudioOutput {
     }
 }
 
-pub fn start(
-    cmd_rx: rtrb::Consumer<EngineCommand>,
-    evt_tx: rtrb::Producer<EngineEvent>,
-) -> Result<AudioOutput, AudioError> {
+pub fn start(link: EngineEnd) -> Result<AudioOutput, AudioError> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or(AudioError::NoDevice)?;
     let supported = device
@@ -59,7 +56,7 @@ pub fn start(
     let mut config: cpal::StreamConfig = supported.into();
     config.buffer_size = buffer_size;
     let sample_rate = config.sample_rate;
-    let engine = Engine::new(sample_rate, cmd_rx, evt_tx);
+    let engine = Engine::new(sample_rate, link);
     let failed = Arc::new(AtomicBool::new(false));
 
     let stream = match format {

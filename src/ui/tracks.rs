@@ -3,10 +3,13 @@
 use egui::{Align2, Color32, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use super::icons;
-use super::studio::Studio;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use super::studio::{Studio, Waveform};
 use super::theme::{
-    self, ACCENT, BG, BORDER, MUTE, SURFACE, SURFACE_2, TEXT, TEXT_DIM, TEXT_FAINT, bold, font,
-    track_color,
+    self, ACCENT, BG, BORDER, MUTE, RECORD, SURFACE, SURFACE_2, TEXT, TEXT_DIM, TEXT_FAINT, bold,
+    font, track_color,
 };
 use crate::project::{Track, TrackKind};
 
@@ -15,6 +18,7 @@ const HEADER_WIDTH: f32 = 230.0;
 const RULER_HEIGHT: f32 = 28.0;
 const PX_PER_BEAT: f32 = 30.0;
 const MIN_BARS: f64 = 32.0;
+const MONITOR: Color32 = Color32::from_rgb(0x34, 0xc3, 0x8f);
 
 fn kind_icon(kind: &TrackKind) -> &'static str {
     match kind {
@@ -84,6 +88,7 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
             );
 
             let selected = studio.selected();
+            let tempo = studio.project.tempo_bpm;
             let mut changed = false;
             let mut select = None;
             let mut pick_sound = None;
@@ -109,7 +114,21 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser
                 );
                 let header = Rect::from_min_size(row.min, vec2(HEADER_WIDTH, ROW_HEIGHT));
                 changed |= track_header(ui, track, header, color, is_sel, &mut pick_sound);
-                draw_clips(ui, track, lane_x, row, color);
+                draw_clips(ui, track, lane_x, row, color, &studio.waveforms, tempo);
+                if let Some((rec_track, from)) = studio.recording_from
+                    && rec_track == track.id
+                    && studio.recording
+                {
+                    let x0 = lane_x + from as f32 * PX_PER_BEAT;
+                    let x1 = lane_x + (studio.position.max(from)) as f32 * PX_PER_BEAT;
+                    let r = Rect::from_min_max(
+                        pos2(x0 + 1.0, row.top() + 6.0),
+                        pos2(x1.max(x0 + 3.0), row.bottom() - 6.0),
+                    );
+                    let p = ui.painter_at(Rect::from_min_max(pos2(lane_x, row.top()), row.max));
+                    p.rect_filled(r, 6, RECORD.gamma_multiply(0.28));
+                    p.rect_stroke(r, 6, Stroke::new(1.0, RECORD), StrokeKind::Inside);
+                }
             }
             if let Some(id) = select {
                 studio.select(id);
@@ -265,13 +284,22 @@ fn track_header(
 
     // Mute / solo / volume on the right.
     let mut changed = false;
+    let voice = track.is_audio();
     let controls = Rect::from_min_max(
-        pos2(rect.right() - 76.0, rect.top() + 11.0),
+        pos2(
+            rect.right() - if voice { 104.0 } else { 76.0 },
+            rect.top() + 11.0,
+        ),
         pos2(rect.right() - 12.0, rect.bottom() - 10.0),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         ui.horizontal(|ui| {
+            if voice {
+                changed |= theme::icon_chip(ui, icons::HEADPHONES, &mut track.monitor, MONITOR)
+                    .on_hover_text("Hear yourself while this track is selected (use headphones)")
+                    .clicked();
+            }
             changed |= theme::toggle_chip(ui, "M", &mut track.mute, MUTE)
                 .on_hover_text("Mute")
                 .clicked();
@@ -279,7 +307,7 @@ fn track_header(
                 .on_hover_text("Solo")
                 .clicked();
         });
-        ui.spacing_mut().slider_width = 64.0;
+        ui.spacing_mut().slider_width = if voice { 92.0 } else { 64.0 };
         ui.spacing_mut().interact_size.y = 14.0;
         changed |= ui
             .add(egui::Slider::new(&mut track.volume, 0.0..=1.5).show_value(false))
@@ -289,7 +317,15 @@ fn track_header(
     changed
 }
 
-fn draw_clips(ui: &Ui, track: &Track, lane_x: f32, row: Rect, color: Color32) {
+fn draw_clips(
+    ui: &Ui,
+    track: &Track,
+    lane_x: f32,
+    row: Rect,
+    color: Color32,
+    waveforms: &HashMap<u64, Arc<Waveform>>,
+    tempo: f64,
+) {
     let painter = ui.painter_at(Rect::from_min_max(pos2(lane_x, row.top()), row.max));
     let dim = if track.mute { 0.35 } else { 1.0 };
     for clip in &track.clips {
@@ -308,6 +344,12 @@ fn draw_clips(ui: &Ui, track: &Track, lane_x: f32, row: Rect, color: Color32) {
             Stroke::new(1.0, color.gamma_multiply(0.7 * dim)),
             StrokeKind::Inside,
         );
+        if clip.is_audio() {
+            if let Some(wave) = waveforms.get(&clip.id) {
+                draw_waveform(&painter, wave, r, tempo, color.gamma_multiply(dim));
+            }
+            continue;
+        }
         // Note preview.
         let (lo, hi) = clip.notes.iter().fold((127u8, 0u8), |(lo, hi), n| {
             (lo.min(n.pitch), hi.max(n.pitch))
@@ -324,5 +366,26 @@ fn draw_clips(ui: &Ui, track: &Track, lane_x: f32, row: Rect, color: Color32) {
                 color.gamma_multiply(dim),
             );
         }
+    }
+}
+
+/// One vertical line per pixel, as tall as the loudest moment it covers.
+fn draw_waveform(painter: &egui::Painter, wave: &Waveform, r: Rect, tempo: f64, color: Color32) {
+    let visible = r.intersect(painter.clip_rect());
+    if visible.width() <= 0.0 {
+        return;
+    }
+    let seconds_per_px = 60.0 / tempo.max(1.0) / PX_PER_BEAT as f64;
+    let mid = r.center().y;
+    let half = r.height() / 2.0 - 5.0;
+    let mut x = visible.left().floor();
+    while x < visible.right() {
+        let t = (x - r.left()).max(0.0) as f64 * seconds_per_px;
+        let h = (wave.peak_between(t, t + seconds_per_px) * half).max(0.5);
+        painter.line_segment(
+            [pos2(x, mid - h), pos2(x, mid + h)],
+            Stroke::new(1.0, color),
+        );
+        x += 1.0;
     }
 }

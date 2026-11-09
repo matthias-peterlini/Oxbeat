@@ -5,15 +5,18 @@ struct Rig {
     engine: Engine,
     cmd: rtrb::Producer<EngineCommand>,
     evt: rtrb::Consumer<EngineEvent>,
+    recorded: rtrb::Consumer<f32>,
+    meters: Arc<Meters>,
 }
 
 fn rig(sr: u32) -> Rig {
-    let (cmd, cmd_rx) = rtrb::RingBuffer::new(1024);
-    let (evt_tx, evt) = rtrb::RingBuffer::new(8192);
+    let (ui, end) = commands::link();
     Rig {
-        engine: Engine::new(sr, cmd_rx, evt_tx),
-        cmd,
-        evt,
+        engine: Engine::new(sr, end),
+        cmd: ui.commands,
+        evt: ui.events,
+        recorded: ui.recorded,
+        meters: ui.meters,
     }
 }
 
@@ -73,6 +76,7 @@ fn with_note_at_beat_1(p: &mut Project, track: u64) {
             start_beat: 1.0,
             length_beats: 1.0,
         }],
+        audio: None,
     });
 }
 
@@ -400,4 +404,151 @@ fn tempo_change_releases_sounding_clip_notes() {
     r.send(EngineCommand::SetProject(Arc::new(p)));
     r.render(48_000);
     assert_eq!(peak(&r.render(512)), 0.0);
+}
+
+/// A voice track with one audio clip of `frames` constant samples at beat `at`.
+fn voice_with_clip(at: f64, frames: usize, rate: u32) -> (Project, u64, u64, Arc<SampleData>) {
+    let mut p = Project::default();
+    let track = p.add_voice_track();
+    p.track_mut(track).unwrap().monitor = false;
+    let clip = p.new_id();
+    let data = Arc::new(SampleData {
+        rate,
+        frames: vec![0.5; frames * 2],
+    });
+    p.track_mut(track).unwrap().clips.push(Clip {
+        id: clip,
+        start_beat: at,
+        length_beats: 64.0,
+        notes: Vec::new(),
+        audio: Some("take.wav".into()),
+    });
+    (p, track, clip, data)
+}
+
+#[test]
+fn audio_clip_plays_from_its_start_beat() {
+    let mut r = rig(48_000);
+    let (p, _, clip, data) = voice_with_clip(1.0, 48_000, 48_000);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::SetAudio {
+        clip,
+        data: Some(data),
+    });
+    r.send(EngineCommand::Play);
+    let out = r.render(48_000);
+    // Beat 1 at 120 bpm is sample 24 000.
+    assert_eq!(first_nonzero(&out), Some(24_000));
+    assert!(peak(&out) > 0.2);
+}
+
+#[test]
+fn audio_clip_is_resampled_to_the_engine_rate() {
+    let mut r = rig(48_000);
+    // One second of audio at 24 kHz lasts one second (48 000 samples) here.
+    let (p, _, clip, data) = voice_with_clip(0.0, 24_000, 24_000);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::SetAudio {
+        clip,
+        data: Some(data),
+    });
+    r.send(EngineCommand::Play);
+    let out = r.render(60_000);
+    let last = out.iter().rposition(|x| *x != 0.0).unwrap();
+    assert!((47_990..48_000).contains(&last), "ended at {last}");
+}
+
+#[test]
+fn forgotten_audio_is_handed_back_and_silent() {
+    let mut r = rig(48_000);
+    let (p, _, clip, data) = voice_with_clip(0.0, 48_000, 48_000);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::SetAudio {
+        clip,
+        data: Some(data),
+    });
+    r.send(EngineCommand::SetAudio { clip, data: None });
+    r.send(EngineCommand::Play);
+    assert_eq!(peak(&r.render(4096)), 0.0);
+    assert!(
+        r.events()
+            .iter()
+            .any(|e| matches!(e, EngineEvent::RetiredAudio(_)))
+    );
+}
+
+/// A microphone queue pre-filled with `n` samples of `value`.
+fn mic(n: usize, value: f32) -> rtrb::Consumer<f32> {
+    let (mut tx, rx) = rtrb::RingBuffer::new(n.max(1));
+    for _ in 0..n {
+        tx.push(value).unwrap();
+    }
+    rx
+}
+
+#[test]
+fn voice_take_records_microphone_from_the_playhead() {
+    let mut r = rig(48_000);
+    let mut p = Project::default();
+    let track = p.add_voice_track();
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::Locate(2.5));
+    r.render(64);
+    r.send(EngineCommand::SetInput(Some(mic(4096, 0.25))));
+    r.send(EngineCommand::Record { track });
+    r.render(1024);
+    r.send(EngineCommand::Stop);
+    r.render(64);
+    let mut got = Vec::new();
+    while let Ok(s) = r.recorded.pop() {
+        got.push(s);
+    }
+    assert_eq!(got.len(), 1024);
+    assert!(got.iter().all(|s| *s == 0.25));
+    let finished = r.events().into_iter().find_map(|e| match e {
+        EngineEvent::RecordFinished {
+            start_beat,
+            length_beats,
+            ..
+        } => Some((start_beat, length_beats)),
+        _ => None,
+    });
+    let (start, len) = finished.unwrap();
+    assert!(
+        (start - 2.5).abs() < 1e-9,
+        "voice takes start where recording began"
+    );
+    assert!((len - 1024.0 / 24_000.0).abs() < 1e-9);
+    assert!(r.meters.take_input() >= 0.25);
+}
+
+#[test]
+fn microphone_is_heard_only_on_the_armed_monitored_track() {
+    let mut r = rig(48_000);
+    let mut p = Project::default();
+    let a = p.add_voice_track();
+    let b = p.add_voice_track();
+    p.track_mut(b).unwrap().monitor = false;
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::SetInput(Some(mic(8192, 0.5))));
+    r.send(EngineCommand::SetArmed(b));
+    assert_eq!(peak(&r.render(512)), 0.0, "b is armed but not monitored");
+    r.send(EngineCommand::SetArmed(a));
+    let out = r.render(512);
+    assert!(peak(&out) > 0.2, "a is armed and monitored");
+    // Nothing reaches the take queue unless recording.
+    assert!(r.recorded.pop().is_err());
+}
+
+#[test]
+fn closing_the_microphone_hands_the_queue_back() {
+    let mut r = rig(48_000);
+    r.send(EngineCommand::SetInput(Some(mic(16, 0.1))));
+    r.send(EngineCommand::SetInput(None));
+    r.render(64);
+    assert!(
+        r.events()
+            .iter()
+            .any(|e| matches!(e, EngineEvent::RetiredInput(_)))
+    );
 }

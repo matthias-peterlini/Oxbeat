@@ -336,7 +336,7 @@ pub fn show(ctx: &egui::Context, studio: &mut Studio, b: &mut Browser) {
             header(ui, b);
             ui.add_space(14.0);
             match b.page.clone() {
-                Page::TrackType => track_type_page(ui, b),
+                Page::TrackType => track_type_page(ui, studio, b),
                 Page::Sounds => sounds_page(ui, studio, b, current.as_deref()),
                 Page::Presets {
                     path,
@@ -383,14 +383,19 @@ fn header(ui: &mut Ui, b: &mut Browser) {
     });
 }
 
-fn track_type_page(ui: &mut Ui, b: &mut Browser) {
+fn track_type_page(ui: &mut Ui, studio: &mut Studio, b: &mut Browser) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         if type_card(ui, icons::PIANO, "Instrument", "Play with a keyboard", true) {
             b.page = Page::Sounds;
             b.drums = false;
         }
-        type_card(ui, icons::MIC, "Voice", "Coming soon", false);
+        if type_card(ui, icons::MIC, "Voice", "Sing or record audio", true) {
+            let id = studio.project.add_voice_track();
+            studio.sync();
+            studio.select(id);
+            b.open = false;
+        }
         if type_card(ui, icons::DRUM, "Drums", "Beats and grooves", true) {
             b.page = Page::Sounds;
             b.drums = true;
