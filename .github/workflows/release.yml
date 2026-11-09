@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            formats: nsis
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            formats: dmg
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            formats: dmg
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            formats: appimage,deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libgtk-3-dev libfuse2
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        run: cargo packager --release --target ${{ matrix.target }} --formats ${{ matrix.formats }}
+      - name: Name artifacts by platform
+        shell: bash
+        run: |
+          mkdir -p dist
+          for f in target/packager/*; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            case "$base" in
+              *.dmg) cp "$f" "dist/${base%.dmg}_${{ matrix.target }}.dmg" ;;
+              *) cp "$f" "dist/$base" ;;
+            esac
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oxbeat-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Unsigned builds: on macOS right-click → Open the first time; on Windows choose "More info → Run anyway".
