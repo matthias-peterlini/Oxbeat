@@ -7,7 +7,6 @@ use super::studio::{Studio, bar_and_beat};
 use super::theme::{
     self, ACCENT, BORDER, RECORD, SURFACE_2, SURFACE_3, TEXT, TEXT_DIM, TEXT_FAINT, bold, font,
 };
-use crate::engine::synth::PRESETS;
 
 pub const HEIGHT: f32 = 56.0;
 
@@ -16,12 +15,6 @@ pub enum Action {
     New,
     Open,
     Save,
-}
-
-#[derive(Default)]
-pub struct AddTrackDialog {
-    pub open: bool,
-    choosing_sound: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -185,7 +178,11 @@ fn display(ui: &mut Ui, studio: &mut Studio) {
         });
 }
 
-pub fn show(ui: &mut Ui, studio: &mut Studio, dialog: &mut AddTrackDialog) -> Action {
+pub fn show(
+    ui: &mut Ui,
+    studio: &mut Studio,
+    dialog: &mut super::sound_browser::Browser,
+) -> Action {
     let mut action = Action::None;
     let full = ui.available_rect_before_wrap();
     let full = Rect::from_min_size(full.min, vec2(full.width(), HEIGHT));
@@ -260,145 +257,10 @@ pub fn show(ui: &mut Ui, studio: &mut Studio, dialog: &mut AddTrackDialog) -> Ac
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
         |ui| {
             if theme::primary_button(ui, Some(icons::PLUS), "Add Track").clicked() {
-                dialog.open = true;
-                dialog.choosing_sound = false;
+                dialog.open_new_track();
             }
         },
     );
     ui.allocate_rect(full, Sense::hover());
     action
-}
-
-/// A selectable card with a large icon, title and caption.
-fn type_card(ui: &mut Ui, icon: &str, title: &str, caption: &str, enabled: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(146.0, 132.0), Sense::click());
-    let hovered = enabled && resp.hovered();
-    let p = ui.painter();
-    p.rect_filled(rect, 10, if hovered { SURFACE_3 } else { SURFACE_2 });
-    if hovered {
-        p.rect_stroke(rect, 10, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
-    }
-    let dim = if enabled { 1.0 } else { 0.4 };
-    p.text(
-        rect.center_top() + vec2(0.0, 44.0),
-        Align2::CENTER_CENTER,
-        icon,
-        theme::icon(30.0),
-        TEXT.gamma_multiply(dim),
-    );
-    p.text(
-        rect.center_top() + vec2(0.0, 84.0),
-        Align2::CENTER_CENTER,
-        title,
-        bold(14.0),
-        TEXT.gamma_multiply(dim),
-    );
-    p.text(
-        rect.center_top() + vec2(0.0, 105.0),
-        Align2::CENTER_CENTER,
-        caption,
-        font(11.5),
-        TEXT_DIM.gamma_multiply(dim),
-    );
-    enabled && resp.clicked()
-}
-
-fn preset_caption(preset: &str) -> &'static str {
-    match preset {
-        "Keys" => "Soft electric piano",
-        "Bass" => "Warm, round synth bass",
-        "Lead" => "Bright square lead",
-        "Pad" => "Slow, wide synth pad",
-        _ => "",
-    }
-}
-
-pub fn add_track_dialog(ctx: &egui::Context, studio: &mut Studio, dialog: &mut AddTrackDialog) {
-    if !dialog.open {
-        return;
-    }
-    let r = egui::Modal::new(egui::Id::unique("add-track"))
-        .frame(
-            egui::Frame::window(&ctx.global_style())
-                .inner_margin(24)
-                .corner_radius(12),
-        )
-        .show(ctx, |ui| {
-            ui.set_width(462.0);
-            ui.horizontal(|ui| {
-                if dialog.choosing_sound
-                    && theme::icon_button(ui, icons::CHEVRON_LEFT, 28.0, false)
-                        .on_hover_text("Back")
-                        .clicked()
-                {
-                    dialog.choosing_sound = false;
-                }
-                let title = if dialog.choosing_sound {
-                    "Choose a Sound"
-                } else {
-                    "New Track"
-                };
-                ui.label(egui::RichText::new(title).font(bold(18.0)));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, icons::X, 28.0, false).clicked() {
-                        dialog.open = false;
-                    }
-                });
-            });
-            ui.add_space(16.0);
-
-            if !dialog.choosing_sound {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    if type_card(ui, icons::PIANO, "Instrument", "Play with a keyboard", true) {
-                        dialog.choosing_sound = true;
-                    }
-                    type_card(ui, icons::MIC, "Voice", "Coming soon", false);
-                    type_card(ui, icons::DRUM, "Drums", "Coming soon", false);
-                });
-            } else {
-                for preset in PRESETS {
-                    let (rect, resp) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::click());
-                    let p = ui.painter();
-                    if resp.hovered() {
-                        p.rect_filled(rect, 8, SURFACE_2);
-                    }
-                    let icon_rect =
-                        Rect::from_min_size(rect.min + vec2(10.0, 9.0), vec2(36.0, 36.0));
-                    p.rect_filled(icon_rect, 8, SURFACE_3);
-                    p.text(
-                        icon_rect.center(),
-                        Align2::CENTER_CENTER,
-                        icons::AUDIO_LINES,
-                        theme::icon(17.0),
-                        ACCENT,
-                    );
-                    let x = icon_rect.right() + 14.0;
-                    p.text(
-                        pos2(x, rect.top() + 18.0),
-                        Align2::LEFT_CENTER,
-                        preset,
-                        bold(14.0),
-                        TEXT,
-                    );
-                    p.text(
-                        pos2(x, rect.top() + 36.0),
-                        Align2::LEFT_CENTER,
-                        preset_caption(preset),
-                        font(12.0),
-                        TEXT_DIM,
-                    );
-                    if resp.clicked() {
-                        let id = studio.project.add_instrument_track(preset);
-                        studio.sync();
-                        studio.select(id);
-                        dialog.open = false;
-                    }
-                }
-            }
-        });
-    if r.should_close() {
-        dialog.open = false;
-    }
 }

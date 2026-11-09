@@ -29,9 +29,45 @@ pub fn key_to_pitch(key: Key, octave: i8) -> Option<u8> {
     u8::try_from(pitch).ok().filter(|p| *p <= 127)
 }
 
+/// Drum pad index (0-based, in `PADS` order) for `key`: same keys as the piano layout.
+pub fn key_to_pad(key: Key) -> Option<usize> {
+    PAD_KEYS.iter().position(|k| *k == key)
+}
+
+/// Home row first (kick, snare, hats on A S D F), then the row above.
+const PAD_KEYS: [Key; 12] = [
+    Key::A,
+    Key::S,
+    Key::D,
+    Key::F,
+    Key::G,
+    Key::H,
+    Key::J,
+    Key::K,
+    Key::W,
+    Key::E,
+    Key::T,
+    Key::Y,
+];
+
+/// The key label for pad `index`.
+pub fn pad_key_label(index: usize) -> &'static str {
+    const LABELS: [&str; 12] = ["A", "S", "D", "F", "G", "H", "J", "K", "W", "E", "T", "Y"];
+    LABELS.get(index).copied().unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pads_follow_layout() {
+        assert_eq!(key_to_pad(Key::A), Some(0));
+        assert_eq!(key_to_pad(Key::S), Some(1));
+        assert_eq!(key_to_pad(Key::Y), Some(11));
+        assert_eq!(key_to_pad(Key::U), None);
+        assert_eq!(pad_key_label(2), "D");
+    }
 
     #[test]
     fn maps_home_row() {

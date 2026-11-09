@@ -9,14 +9,21 @@ repository = "https://github.com/matthias-peterlini/Oxbeat"
 [dependencies]
 anyhow = "1.0.104"
 cpal = "0.18.2"
+dirs = "7.0.0"
 eframe = "0.37.0"
 egui = "0.37.0"
+hound = "3.5.1"
 midir = "0.11.1"
 rfd = "0.18.0"
 rtrb = "0.4.1"
+rustysynth = "1.3.8"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
+symphonia = { version = "0.6.1", default-features = false, features = ["wav", "flac", "ogg", "vorbis", "mp3", "pcm"] }
 thiserror = "2.0.21"
+ureq = "3.5.1"
+zip = { version = "9.5.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

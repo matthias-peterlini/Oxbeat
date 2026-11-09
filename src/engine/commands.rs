@@ -2,10 +2,17 @@
 
 use std::sync::Arc;
 
+use super::instrument::Instrument;
 use crate::project::{Note, Project};
 
 pub enum EngineCommand {
     SetProject(Arc<Project>),
+    /// Replace a track's instrument. `sound` is `sound_hash` of its sound id.
+    SetInstrument {
+        track: u64,
+        sound: u64,
+        instrument: Box<Instrument>,
+    },
     NoteOn {
         track: u64,
         pitch: u8,
@@ -41,4 +48,6 @@ pub enum EngineEvent {
     /// A project snapshot the engine no longer needs; dropped by the receiver so
     /// the audio thread never frees memory.
     Retired(Arc<Project>),
+    /// An instrument the engine no longer needs, same reason.
+    RetiredInstrument(Box<Instrument>),
 }

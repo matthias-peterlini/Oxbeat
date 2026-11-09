@@ -1,10 +1,12 @@
 //! Non-visual app state: the project, the engine link, recording assembly.
 //! Kept free of egui so it can be unit-tested.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::engine::commands::{EngineCommand, EngineEvent};
+use crate::engine::instrument::{Instrument, sound_hash};
 use crate::project::{Clip, Note, Project};
 
 const COMMAND_QUEUE: usize = 4096;
@@ -82,6 +84,11 @@ pub struct Studio {
     pending: Vec<(u64, Note)>,
     /// The engine is still finishing a take from a project we replaced; ignore it.
     discard_take: bool,
+    pub sample_rate: u32,
+    /// Sound id each track's engine instrument was built from.
+    loaded: HashMap<u64, String>,
+    /// Sounds that failed to load: (track name, message), for the UI to show.
+    pub load_errors: Vec<String>,
 }
 
 impl Studio {
@@ -91,7 +98,7 @@ impl Studio {
         events: rtrb::Consumer<EngineEvent>,
     ) -> Self {
         let selected = project.tracks.first().map_or(0, |t| t.id);
-        let s = Self {
+        let mut s = Self {
             project,
             shared: Arc::new(Shared {
                 cmd: Mutex::new(cmd),
@@ -104,6 +111,9 @@ impl Studio {
             recording: false,
             pending: Vec::new(),
             discard_take: false,
+            sample_rate: 48_000,
+            loaded: HashMap::new(),
+            load_errors: Vec::new(),
         };
         s.sync();
         s
@@ -116,10 +126,56 @@ impl Studio {
         p
     }
 
-    /// Push the current project to the engine.
-    pub fn sync(&self) {
+    /// Push the current project, and any instruments whose sound changed, to the engine.
+    pub fn sync(&mut self) {
+        // Take heavy instruments back from tracks about to disappear, so the engine
+        // never has to free them.
+        let gone: Vec<u64> = self
+            .loaded
+            .keys()
+            .filter(|id| self.project.track(**id).and_then(|t| t.sound()).is_none())
+            .copied()
+            .collect();
+        for track in gone {
+            self.loaded.remove(&track);
+            self.shared.send(EngineCommand::SetInstrument {
+                track,
+                sound: 0,
+                instrument: Box::new(Instrument::None),
+            });
+        }
         self.shared
             .send(EngineCommand::SetProject(Arc::new(self.project.clone())));
+        let changed: Vec<(u64, String)> = self
+            .project
+            .tracks
+            .iter()
+            .filter_map(|t| Some((t.id, t.sound()?.to_string())))
+            .filter(|(id, s)| self.loaded.get(id) != Some(s))
+            .collect();
+        for (track, sound) in changed {
+            let instrument = match crate::sounds::load(&sound, self.sample_rate) {
+                Ok(i) => i,
+                Err(e) => {
+                    self.load_errors
+                        .push(format!("Could not load \"{sound}\": {e}"));
+                    Instrument::None
+                }
+            };
+            self.shared.send(EngineCommand::SetInstrument {
+                track,
+                sound: sound_hash(&sound),
+                instrument: Box::new(instrument),
+            });
+            self.loaded.insert(track, sound);
+        }
+    }
+
+    /// The engine now runs at `sr`: rebuild every instrument for it.
+    pub fn set_sample_rate(&mut self, sr: u32) {
+        self.sample_rate = sr;
+        self.loaded.clear();
+        self.sync();
     }
 
     pub fn selected(&self) -> u64 {
@@ -162,6 +218,7 @@ impl Studio {
         self.playing = false;
         self.recording = false;
         self.pending.clear();
+        self.loaded.clear();
         self.sync();
     }
 
@@ -207,6 +264,7 @@ impl Studio {
                 }
             }
             EngineEvent::Retired(old) => drop(old),
+            EngineEvent::RetiredInstrument(old) => drop(old),
         }
     }
 

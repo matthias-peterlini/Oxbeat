@@ -2,6 +2,7 @@
 
 mod icons;
 mod keyboard_strip;
+mod sound_browser;
 pub mod studio;
 mod theme;
 mod top_bar;
@@ -15,7 +16,7 @@ use egui::{Color32, Key};
 
 use crate::audio::output::{self, AudioOutput};
 use crate::midi::input::{MidiInputs, MidiMsg};
-use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE, key_to_pitch, stale_keys};
+use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE, key_to_pad, key_to_pitch, stale_keys};
 use crate::project::io;
 use studio::Studio;
 
@@ -35,7 +36,7 @@ pub struct OxbeatApp {
     octave: i8,
     bundle: Option<PathBuf>,
     error: Option<String>,
-    add_track: top_bar::AddTrackDialog,
+    add_track: sound_browser::Browser,
     /// Computer keys currently down -> pitch they started.
     computer_keys: Vec<(Key, u8)>,
     /// Pitch held with the mouse on the on-screen keyboard.
@@ -46,12 +47,14 @@ impl OxbeatApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
         let ((cmd_tx, cmd_rx), (evt_tx, evt_rx)) = studio::queues();
-        let studio = Studio::new(Studio::starter_project(), cmd_tx, evt_rx);
+        let mut studio = Studio::new(Studio::starter_project(), cmd_tx, evt_rx);
         let (audio, audio_error) = match output::start(cmd_rx, evt_tx) {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(e.to_string())),
         };
-        studio.sync();
+        if let Some(a) = &audio {
+            studio.set_sample_rate(a.sample_rate());
+        }
 
         let shared = studio.shared.clone();
         let ctx = cc.egui_ctx.clone();
@@ -96,9 +99,9 @@ impl OxbeatApp {
         self.studio.reconnect(cmd_tx, evt_rx);
         match output::start(cmd_rx, evt_tx) {
             Ok(a) => {
+                self.studio.set_sample_rate(a.sample_rate());
                 self.audio = Some(a);
                 self.audio_error = None;
-                self.studio.sync();
             }
             Err(e) => self.audio_error = Some(e.to_string()),
         }
@@ -211,7 +214,17 @@ impl OxbeatApp {
                     Key::Z => self.octave = (self.octave - 1).max(MIN_OCTAVE),
                     Key::X => self.octave = (self.octave + 1).min(MAX_OCTAVE),
                     _ => {
-                        if let Some(p) = key_to_pitch(key, self.octave)
+                        let drums = self
+                            .studio
+                            .project
+                            .track(self.studio.selected())
+                            .is_some_and(|t| t.is_drums());
+                        let pitch = if drums {
+                            key_to_pad(key).map(|i| crate::engine::drums::PADS[i].0)
+                        } else {
+                            key_to_pitch(key, self.octave)
+                        };
+                        if let Some(p) = pitch
                             && !self.computer_keys.iter().any(|(k, _)| *k == key)
                         {
                             self.computer_keys.push((key, p));
@@ -337,9 +350,17 @@ impl eframe::App for OxbeatApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG))
-            .show(ui, |ui| tracks::show(ui, &mut self.studio));
+            .show(ui, |ui| {
+                tracks::show(ui, &mut self.studio, &mut self.add_track)
+            });
 
-        top_bar::add_track_dialog(&ctx, &mut self.studio, &mut self.add_track);
+        sound_browser::show(&ctx, &mut self.studio, &mut self.add_track);
+        if self.error.is_none() && !self.studio.load_errors.is_empty() {
+            self.error = Some(std::mem::take(&mut self.studio.load_errors).join(
+                "
+",
+            ));
+        }
         self.error_dialog(&ctx);
     }
 }

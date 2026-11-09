@@ -2,16 +2,18 @@
 //! allocates, locks or does I/O.
 
 pub mod commands;
+pub mod drums;
+pub mod instrument;
 pub mod synth;
 pub mod transport;
 
 use std::sync::Arc;
 
 use commands::{EngineCommand, EngineEvent};
-use synth::{PRESETS, Synth};
+use instrument::{Instrument, sound_hash};
 use transport::{beat_to_sample, sample_to_beat};
 
-use crate::project::{Note, Project, TrackKind};
+use crate::project::{Note, Project};
 
 /// Internal processing chunk; bounds scratch buffer size.
 const CHUNK: usize = 512;
@@ -22,12 +24,9 @@ const MIN_NOTE_BEATS: f64 = 1.0 / 128.0;
 
 struct TrackState {
     id: u64,
-    preset: usize,
-    synth: Synth,
-}
-
-fn preset_index(name: &str) -> usize {
-    PRESETS.iter().position(|p| *p == name).unwrap_or(0)
+    /// `sound_hash` of the sound the instrument was built for.
+    sound: u64,
+    instrument: Instrument,
 }
 
 struct Recording {
@@ -47,6 +46,7 @@ pub struct Engine {
     pos: u64,
     recording: Option<Recording>,
     scratch: [f32; CHUNK],
+    scratch_r: [f32; CHUNK],
     since_position: u32,
 }
 
@@ -66,6 +66,7 @@ impl Engine {
             pos: 0,
             recording: None,
             scratch: [0.0; CHUNK],
+            scratch_r: [0.0; CHUNK],
             since_position: 0,
         }
     }
@@ -80,31 +81,34 @@ impl Engine {
         let _ = self.evt_tx.push(e);
     }
 
-    fn synth_for(&mut self, track: u64) -> Option<&mut Synth> {
+    fn synth_for(&mut self, track: u64) -> Option<&mut Instrument> {
         self.tracks
             .iter_mut()
             .find(|t| t.id == track)
-            .map(|t| &mut t.synth)
+            .map(|t| &mut t.instrument)
     }
 
     fn set_project(&mut self, p: Arc<Project>) {
         self.tracks.retain(|t| p.track(t.id).is_some());
+        let sr = self.sample_rate;
         for track in &p.tracks {
-            let TrackKind::Instrument { preset } = &track.kind else {
+            let Some(sound) = track.sound() else {
                 continue;
             };
-            let preset = preset_index(preset);
-            let sr = self.sample_rate;
+            let hash = sound_hash(sound);
             if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track.id) {
-                if t.preset != preset {
-                    t.preset = preset;
-                    t.synth = Synth::new(PRESETS[preset], sr);
+                // Built-in sounds are swapped here; anything heavier arrives later in a
+                // SetInstrument, and the old instrument keeps playing until then.
+                if t.sound != hash && t.instrument.is_heap_free() {
+                    t.sound = hash;
+                    t.instrument.all_notes_off();
+                    t.instrument = Instrument::builtin(sound, sr).unwrap_or(Instrument::None);
                 }
             } else if self.tracks.len() < MAX_TRACKS {
                 self.tracks.push(TrackState {
                     id: track.id,
-                    preset,
-                    synth: Synth::new(PRESETS[preset], sr),
+                    sound: hash,
+                    instrument: Instrument::builtin(sound, sr).unwrap_or(Instrument::None),
                 });
             }
         }
@@ -121,7 +125,7 @@ impl Engine {
 
     fn all_off(&mut self) {
         for t in &mut self.tracks {
-            t.synth.all_notes_off();
+            t.instrument.all_notes_off();
         }
     }
 
@@ -157,6 +161,19 @@ impl Engine {
     fn handle(&mut self, cmd: EngineCommand) {
         match cmd {
             EngineCommand::SetProject(p) => self.set_project(p),
+            EngineCommand::SetInstrument {
+                track,
+                sound,
+                mut instrument,
+            } => {
+                if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track) {
+                    t.instrument.all_notes_off();
+                    std::mem::swap(&mut t.instrument, &mut *instrument);
+                    t.sound = sound;
+                }
+                // Hand the old one (or the unused new one) back to be freed off-thread.
+                self.send(EngineEvent::RetiredInstrument(instrument));
+            }
             EngineCommand::NoteOn {
                 track,
                 pitch,
@@ -285,6 +302,8 @@ impl Engine {
             };
             let scratch = &mut self.scratch[..n];
             scratch.fill(0.0);
+            let scratch_r = &mut self.scratch_r[..n];
+            scratch_r.fill(0.0);
 
             // Render in segments split at note events so timing is sample-accurate.
             let mut cur = start;
@@ -305,7 +324,7 @@ impl Engine {
                                     .max(on + 1);
                                 if pass_on {
                                     if on == cur {
-                                        state.synth.note_on(note.pitch, note.velocity);
+                                        state.instrument.note_on(note.pitch, note.velocity);
                                     }
                                     for t in [on, off] {
                                         if t > cur && t < next {
@@ -313,20 +332,22 @@ impl Engine {
                                         }
                                     }
                                 } else if off == cur {
-                                    state.synth.note_off(note.pitch);
+                                    state.instrument.note_off(note.pitch);
                                 }
                             }
                         }
                     }
                     let a = (cur - start) as usize;
                     let b = (next - start) as usize;
-                    state.synth.render(&mut scratch[a..b]);
+                    state
+                        .instrument
+                        .render(&mut scratch[a..b], &mut scratch_r[a..b]);
                     if next >= end {
                         break;
                     }
                     cur = next;
                 } else {
-                    state.synth.render(scratch);
+                    state.instrument.render(scratch, scratch_r);
                     break;
                 }
             }
@@ -337,13 +358,13 @@ impl Engine {
             }
             let angle = (track.pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
             let (l, r) = (angle.cos() * track.volume, angle.sin() * track.volume);
-            for (i, s) in scratch.iter().enumerate() {
+            for (i, (sl, sr)) in scratch.iter().zip(scratch_r.iter()).enumerate() {
                 let frame = &mut out[i * channels..(i + 1) * channels];
                 if channels == 1 {
-                    frame[0] += s * (l + r) * 0.5;
+                    frame[0] += (sl * l + sr * r) * 0.5;
                 } else {
-                    frame[0] += s * l;
-                    frame[1] += s * r;
+                    frame[0] += sl * l;
+                    frame[1] += sr * r;
                 }
             }
         }

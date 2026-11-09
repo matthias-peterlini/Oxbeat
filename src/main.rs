@@ -4,6 +4,7 @@ mod audio;
 mod engine;
 mod midi;
 mod project;
+mod sounds;
 mod ui;
 
 fn main() -> eframe::Result {

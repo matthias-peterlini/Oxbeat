@@ -20,19 +20,19 @@ fn kind_icon(kind: &TrackKind) -> &'static str {
     match kind {
         TrackKind::Instrument { .. } => icons::PIANO,
         TrackKind::Audio => icons::MIC,
-        TrackKind::Drums => icons::DRUM,
+        TrackKind::Drums { .. } => icons::DRUM,
     }
 }
 
-fn kind_label(kind: &TrackKind) -> &'static str {
-    match kind {
-        TrackKind::Instrument { .. } => "Instrument",
-        TrackKind::Audio => "Voice",
-        TrackKind::Drums => "Drums",
+/// Subtitle under the track name: the sound it plays, or "Voice".
+fn kind_label(track: &Track) -> String {
+    match track.sound() {
+        Some(s) => crate::project::display_name(s),
+        None => "Voice".into(),
     }
 }
 
-pub fn show(ui: &mut Ui, studio: &mut Studio) {
+pub fn show(ui: &mut Ui, studio: &mut Studio, browser: &mut super::sound_browser::Browser) {
     if studio.project.tracks.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(
@@ -86,6 +86,7 @@ pub fn show(ui: &mut Ui, studio: &mut Studio) {
             let selected = studio.selected();
             let mut changed = false;
             let mut select = None;
+            let mut pick_sound = None;
             for (i, track) in studio.project.tracks.iter_mut().enumerate() {
                 let top = area.top() + RULER_HEIGHT + i as f32 * ROW_HEIGHT;
                 let row = Rect::from_min_size(pos2(area.left(), top), vec2(total.x, ROW_HEIGHT));
@@ -107,11 +108,15 @@ pub fn show(ui: &mut Ui, studio: &mut Studio) {
                     Stroke::new(1.0, BORDER),
                 );
                 let header = Rect::from_min_size(row.min, vec2(HEADER_WIDTH, ROW_HEIGHT));
-                changed |= track_header(ui, track, header, color, is_sel);
+                changed |= track_header(ui, track, header, color, is_sel, &mut pick_sound);
                 draw_clips(ui, track, lane_x, row, color);
             }
             if let Some(id) = select {
                 studio.select(id);
+            }
+            if let Some((id, drums)) = pick_sound {
+                studio.select(id);
+                browser.open_for_track(id, drums);
             }
             if changed {
                 studio.sync();
@@ -205,6 +210,7 @@ fn track_header(
     rect: Rect,
     color: Color32,
     selected: bool,
+    pick_sound: &mut Option<(u64, bool)>,
 ) -> bool {
     let p = ui.painter();
     if selected {
@@ -220,8 +226,18 @@ fn track_header(
             color.gamma_multiply(0.6)
         },
     );
-    // Icon tile
+    // Icon tile: click to change the sound.
     let tile = Rect::from_min_size(rect.min + vec2(16.0, 14.0), vec2(36.0, 36.0));
+    let tile_resp = ui.interact(tile, ui.scope_id().with(("tile", track.id)), Sense::click());
+    if track.sound().is_some()
+        && tile_resp
+            .on_hover_text("Change sound")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    {
+        *pick_sound = Some((track.id, track.is_drums()));
+    }
+    let p = ui.painter();
     p.rect_filled(tile, 8, color.gamma_multiply(0.18));
     p.text(
         tile.center(),
@@ -242,7 +258,7 @@ fn track_header(
     p.text(
         pos2(x, rect.top() + 41.0),
         Align2::LEFT_CENTER,
-        kind_label(&track.kind),
+        kind_label(track),
         font(11.5),
         TEXT_DIM,
     );

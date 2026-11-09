@@ -5,7 +5,8 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use super::icons;
 use super::studio::Studio;
 use super::theme::{self, ACCENT, BG, TEXT, TEXT_DIM, TEXT_FAINT, bold, font};
-use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE};
+use crate::engine::drums::PADS;
+use crate::midi::keyboard::{MAX_OCTAVE, MIN_OCTAVE, pad_key_label};
 
 const OCTAVES: u8 = 2;
 const KEY_HEIGHT: f32 = 78.0;
@@ -24,28 +25,36 @@ pub fn show(
     mouse_note: &mut Option<u8>,
     keyboards: &[String],
 ) {
-    let name = studio
-        .project
-        .track(studio.selected())
-        .map_or("No track selected".to_string(), |t| t.name.clone());
+    let track = studio.project.track(studio.selected());
+    let name = track.map_or("No track selected".to_string(), |t| t.name.clone());
+    let drums = track.is_some_and(|t| t.is_drums());
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(icons::KEYBOARD_MUSIC)
-                .font(theme::icon(16.0))
-                .color(ACCENT),
+            egui::RichText::new(if drums {
+                icons::DRUM
+            } else {
+                icons::KEYBOARD_MUSIC
+            })
+            .font(theme::icon(16.0))
+            .color(ACCENT),
         );
         ui.label(egui::RichText::new(name).font(bold(13.5)));
         theme::vsep(ui, 14.0);
         if keyboards.is_empty() {
-            ui.label(
-                egui::RichText::new("Computer keyboard: A – K play notes, Z / X change octave")
-                    .color(TEXT_DIM),
-            );
+            let hint = if drums {
+                "Computer keyboard: A – K and W E T Y play the pads"
+            } else {
+                "Computer keyboard: A – K play notes, Z / X change octave"
+            };
+            ui.label(egui::RichText::new(hint).color(TEXT_DIM));
         } else {
             let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
             ui.painter()
                 .circle_filled(dot.center(), 4.0, Color32::from_rgb(0x34, 0xc3, 0x8f));
             ui.label(egui::RichText::new(keyboards.join(", ")).color(TEXT_DIM));
+        }
+        if drums {
+            return;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -70,6 +79,10 @@ pub fn show(
         });
     });
     ui.add_space(6.0);
+    if drums {
+        drum_pads(ui, studio, mouse_note);
+        return;
+    }
 
     let base = ((*octave as i32 + 1) * 12).clamp(0, 127 - 24) as u8;
     let keys = 12 * OCTAVES + 1;
@@ -145,6 +158,10 @@ pub fn show(
     } else {
         None
     };
+    play_mouse(studio, mouse_note, want);
+}
+
+fn play_mouse(studio: &Studio, mouse_note: &mut Option<u8>, want: Option<u8>) {
     if want != *mouse_note {
         if let Some(p) = mouse_note.take() {
             studio.shared.note_off(p);
@@ -154,4 +171,51 @@ pub fn show(
             *mouse_note = Some(p);
         }
     }
+}
+
+/// A row of 12 drum pads that light up and can be clicked.
+fn drum_pads(ui: &mut Ui, studio: &Studio, mouse_note: &mut Option<u8>) {
+    let width = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, KEY_HEIGHT), Sense::click_and_drag());
+    let gap = 6.0;
+    let n = PADS.len() as f32;
+    let w = (width - gap * (n - 1.0)) / n;
+    let painter = ui.painter_at(rect);
+    let mut hit = None;
+    for (i, (note, label)) in PADS.iter().enumerate() {
+        let r = Rect::from_min_size(
+            pos2(rect.left() + i as f32 * (w + gap), rect.top()),
+            vec2(w, KEY_HEIGHT),
+        );
+        let lit = studio.shared.is_held(*note);
+        let hover = resp.hover_pos().is_some_and(|p| r.contains(p));
+        let fill = if lit {
+            ACCENT
+        } else if hover {
+            theme::SURFACE_3
+        } else {
+            theme::SURFACE_2
+        };
+        painter.rect_filled(r, 8, fill);
+        painter.text(
+            r.center() - vec2(0.0, 6.0),
+            Align2::CENTER_CENTER,
+            *label,
+            bold(12.5),
+            TEXT,
+        );
+        painter.text(
+            r.center_bottom() - vec2(0.0, 12.0),
+            Align2::CENTER_CENTER,
+            pad_key_label(i),
+            font(10.5),
+            if lit { TEXT } else { TEXT_FAINT },
+        );
+        if resp.is_pointer_button_down_on()
+            && resp.interact_pointer_pos().is_some_and(|p| r.contains(p))
+        {
+            hit = Some(*note);
+        }
+    }
+    play_mouse(studio, mouse_note, hit);
 }
