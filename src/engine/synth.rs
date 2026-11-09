@@ -172,6 +172,7 @@ impl Synth {
         }
     }
 
+    #[cfg(test)]
     pub fn active_voices(&self) -> usize {
         self.voices
             .iter()

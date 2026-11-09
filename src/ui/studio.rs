@@ -1,0 +1,338 @@
+//! Non-visual app state: the project, the engine link, recording assembly.
+//! Kept free of egui so it can be unit-tested.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use crate::engine::commands::{EngineCommand, EngineEvent};
+use crate::project::{Clip, Note, Project};
+
+const COMMAND_QUEUE: usize = 4096;
+const EVENT_QUEUE: usize = 16_384;
+
+/// State shared with the MIDI thread.
+pub struct Shared {
+    pub cmd: Mutex<rtrb::Producer<EngineCommand>>,
+    /// Track id that live input goes to (0 = none).
+    pub selected: AtomicU64,
+    /// Which pitches are currently held (for the on-screen keyboard).
+    pub held: [AtomicBool; 128],
+}
+
+impl Shared {
+    pub fn send(&self, c: EngineCommand) {
+        if let Ok(mut tx) = self.cmd.lock() {
+            let _ = tx.push(c);
+        }
+    }
+
+    pub fn note_on(&self, pitch: u8, velocity: u8) {
+        self.held[pitch as usize & 127].store(true, Ordering::Relaxed);
+        let track = self.selected.load(Ordering::Relaxed);
+        if track != 0 {
+            self.send(EngineCommand::NoteOn {
+                track,
+                pitch,
+                velocity,
+            });
+        }
+    }
+
+    pub fn note_off(&self, pitch: u8) {
+        self.held[pitch as usize & 127].store(false, Ordering::Relaxed);
+        let track = self.selected.load(Ordering::Relaxed);
+        if track != 0 {
+            self.send(EngineCommand::NoteOff { track, pitch });
+        }
+    }
+
+    /// Release everything held on the selected track (e.g. keyboard unplugged).
+    pub fn release_all(&self) {
+        for h in &self.held {
+            h.store(false, Ordering::Relaxed);
+        }
+        let track = self.selected.load(Ordering::Relaxed);
+        if track != 0 {
+            self.send(EngineCommand::AllNotesOff { track });
+        }
+    }
+
+    pub fn is_held(&self, pitch: u8) -> bool {
+        self.held[pitch as usize & 127].load(Ordering::Relaxed)
+    }
+}
+
+pub type Queue<T> = (rtrb::Producer<T>, rtrb::Consumer<T>);
+
+/// Fresh (command, event) queues for linking the UI to an engine.
+pub fn queues() -> (Queue<EngineCommand>, Queue<EngineEvent>) {
+    (
+        rtrb::RingBuffer::new(COMMAND_QUEUE),
+        rtrb::RingBuffer::new(EVENT_QUEUE),
+    )
+}
+
+pub struct Studio {
+    pub project: Project,
+    pub shared: Arc<Shared>,
+    pub events: rtrb::Consumer<EngineEvent>,
+    pub position: f64,
+    pub playing: bool,
+    pub recording: bool,
+    pending: Vec<(u64, Note)>,
+}
+
+impl Studio {
+    pub fn new(
+        project: Project,
+        cmd: rtrb::Producer<EngineCommand>,
+        events: rtrb::Consumer<EngineEvent>,
+    ) -> Self {
+        let selected = project.tracks.first().map_or(0, |t| t.id);
+        let s = Self {
+            project,
+            shared: Arc::new(Shared {
+                cmd: Mutex::new(cmd),
+                selected: AtomicU64::new(selected),
+                held: std::array::from_fn(|_| AtomicBool::new(false)),
+            }),
+            events,
+            position: 0.0,
+            playing: false,
+            recording: false,
+            pending: Vec::new(),
+        };
+        s.sync();
+        s
+    }
+
+    /// A first-launch project: one "Keys" track, ready to play.
+    pub fn starter_project() -> Project {
+        let mut p = Project::default();
+        p.add_instrument_track("Keys");
+        p
+    }
+
+    /// Push the current project to the engine.
+    pub fn sync(&self) {
+        self.shared
+            .send(EngineCommand::SetProject(Arc::new(self.project.clone())));
+    }
+
+    pub fn selected(&self) -> u64 {
+        self.shared.selected.load(Ordering::Relaxed)
+    }
+
+    pub fn select(&self, track: u64) {
+        let old = self.selected();
+        if old != track {
+            self.shared.release_all();
+            self.shared.selected.store(track, Ordering::Relaxed);
+        }
+    }
+
+    /// Swap in a different project (new/open).
+    pub fn replace_project(&mut self, project: Project) {
+        self.shared.send(EngineCommand::Stop);
+        self.shared.release_all();
+        self.project = project;
+        self.pending.clear();
+        self.playing = false;
+        self.recording = false;
+        self.sync();
+        self.shared.send(EngineCommand::Locate(0.0));
+        let first = self.project.tracks.first().map_or(0, |t| t.id);
+        self.shared.selected.store(first, Ordering::Relaxed);
+    }
+
+    /// Reconnect to a new engine (audio device restarted).
+    pub fn reconnect(
+        &mut self,
+        cmd: rtrb::Producer<EngineCommand>,
+        events: rtrb::Consumer<EngineEvent>,
+    ) {
+        if let Ok(mut tx) = self.shared.cmd.lock() {
+            *tx = cmd;
+        }
+        self.events = events;
+        self.playing = false;
+        self.recording = false;
+        self.pending.clear();
+        self.sync();
+    }
+
+    pub fn drain_events(&mut self) {
+        while let Ok(e) = self.events.pop() {
+            self.apply_event(e);
+        }
+    }
+
+    pub fn apply_event(&mut self, e: EngineEvent) {
+        match e {
+            EngineEvent::Position(b) => self.position = b,
+            EngineEvent::RecordedNote { track, note } => self.pending.push((track, note)),
+            EngineEvent::RecordFinished {
+                track,
+                start_beat,
+                length_beats,
+            } => {
+                let notes: Vec<Note> = self
+                    .pending
+                    .iter()
+                    .filter(|(t, _)| *t == track)
+                    .map(|(_, n)| Note {
+                        start_beat: n.start_beat - start_beat,
+                        ..*n
+                    })
+                    .collect();
+                self.pending.retain(|(t, _)| *t != track);
+                if notes.is_empty() {
+                    return;
+                }
+                let id = self.project.new_id();
+                if let Some(t) = self.project.track_mut(track) {
+                    t.clips.push(Clip {
+                        id,
+                        start_beat,
+                        length_beats,
+                        notes,
+                    });
+                    self.sync();
+                }
+            }
+            EngineEvent::Retired(old) => drop(old),
+        }
+    }
+
+    pub fn play_stop(&mut self) {
+        if self.playing {
+            self.shared.send(EngineCommand::Stop);
+            self.playing = false;
+            self.recording = false;
+        } else {
+            self.shared.send(EngineCommand::Play);
+            self.playing = true;
+        }
+    }
+
+    pub fn record(&mut self) {
+        if self.recording {
+            self.play_stop();
+            return;
+        }
+        let track = self.selected();
+        if track == 0 {
+            return;
+        }
+        self.shared.send(EngineCommand::Record { track });
+        self.recording = true;
+        self.playing = true;
+    }
+
+    pub fn rewind(&mut self) {
+        self.shared.send(EngineCommand::Locate(0.0));
+        self.position = 0.0;
+    }
+
+    pub fn locate(&mut self, beat: f64) {
+        self.shared.send(EngineCommand::Locate(beat.max(0.0)));
+        self.position = beat.max(0.0);
+    }
+}
+
+/// "bar.beat" for the LCD, 4/4: beat 0 → "001.1", beat 5 → "002.2".
+pub fn format_position(beat: f64) -> String {
+    let beat = beat.max(0.0);
+    let bar = (beat / 4.0).floor() as u64 + 1;
+    let in_bar = (beat % 4.0).floor() as u64 + 1;
+    format!("{bar:03}.{in_bar}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn studio() -> (
+        Studio,
+        rtrb::Consumer<EngineCommand>,
+        rtrb::Producer<EngineEvent>,
+    ) {
+        let ((ctx, crx), (etx, erx)) = queues();
+        (Studio::new(Studio::starter_project(), ctx, erx), crx, etx)
+    }
+
+    #[test]
+    fn formats_position() {
+        assert_eq!(format_position(0.0), "001.1");
+        assert_eq!(format_position(5.0), "002.2");
+        assert_eq!(format_position(3.99), "001.4");
+        assert_eq!(format_position(400.0), "101.1");
+    }
+
+    #[test]
+    fn starter_has_selected_keys_track() {
+        let (s, _, _) = studio();
+        assert_eq!(s.project.tracks.len(), 1);
+        assert_eq!(s.selected(), s.project.tracks[0].id);
+    }
+
+    #[test]
+    fn apply_event_adds_recorded_clip() {
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.apply_event(EngineEvent::RecordedNote {
+            track: t,
+            note: Note {
+                pitch: 60,
+                velocity: 100,
+                start_beat: 5.0,
+                length_beats: 1.0,
+            },
+        });
+        s.apply_event(EngineEvent::RecordFinished {
+            track: t,
+            start_beat: 4.0,
+            length_beats: 4.0,
+        });
+        let clips = &s.project.track(t).unwrap().clips;
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].start_beat, 4.0);
+        assert_eq!(clips[0].notes[0].start_beat, 1.0);
+    }
+
+    #[test]
+    fn empty_take_adds_no_clip() {
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.apply_event(EngineEvent::RecordFinished {
+            track: t,
+            start_beat: 0.0,
+            length_beats: 4.0,
+        });
+        assert!(s.project.track(t).unwrap().clips.is_empty());
+    }
+
+    #[test]
+    fn notes_go_to_selected_track() {
+        let (s, mut crx, _) = studio();
+        while crx.pop().is_ok() {}
+        s.shared.note_on(60, 100);
+        assert!(s.shared.is_held(60));
+        match crx.pop() {
+            Ok(EngineCommand::NoteOn { track, pitch, .. }) => {
+                assert_eq!((track, pitch), (s.selected(), 60))
+            }
+            _ => panic!("expected NoteOn"),
+        }
+    }
+
+    #[test]
+    fn unplug_releases_held_notes() {
+        let (s, mut crx, _) = studio();
+        s.shared.note_on(60, 100);
+        while crx.pop().is_ok() {}
+        s.shared.release_all();
+        assert!(!s.shared.is_held(60));
+        assert!(matches!(crx.pop(), Ok(EngineCommand::AllNotesOff { .. })));
+    }
+}

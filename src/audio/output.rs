@@ -25,15 +25,10 @@ pub enum AudioError {
 
 pub struct AudioOutput {
     _stream: cpal::Stream,
-    sample_rate: u32,
     failed: Arc<AtomicBool>,
 }
 
 impl AudioOutput {
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
     /// True once the device reported a fatal error (e.g. unplugged).
     pub fn has_failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
@@ -79,7 +74,6 @@ pub fn start(
         .map_err(|e| AudioError::Build(e.to_string()))?;
     Ok(AudioOutput {
         _stream: stream,
-        sample_rate,
         failed,
     })
 }
