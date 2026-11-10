@@ -4,6 +4,7 @@ mod effects_panel;
 mod history;
 mod icons;
 mod keyboard_strip;
+mod loader;
 mod mixer;
 mod piano_roll;
 mod sound_browser;
@@ -82,13 +83,20 @@ impl OxbeatApp {
             Arc::new(move || ctx.request_repaint())
         });
         let essentials_installed = packs.is_installed(crate::sounds::essentials::ID).is_some();
-        let mut studio = Studio::new(Studio::starter_project(essentials_installed), ui_end);
         let (audio, audio_error) = match output::start(engine_end) {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(e.to_string())),
         };
-        if let Some(a) = &audio {
-            studio.set_sample_rate(a.sample_rate());
+        // Built at the device's rate straight away, so the starter piano loads once
+        // (in the background).
+        let studio = Studio::with_sample_rate(
+            Studio::starter_project(essentials_installed),
+            ui_end,
+            audio.as_ref().map_or(48_000, |a| a.sample_rate()),
+        );
+        {
+            let ctx = cc.egui_ctx.clone();
+            studio.set_repaint(move || ctx.request_repaint());
         }
 
         let shared = studio.shared.clone();
