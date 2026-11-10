@@ -445,17 +445,28 @@ fn sounds_page(ui: &mut Ui, studio: &mut Studio, b: &mut Browser, current: Optio
                     .filter(|i| i.kind == kind)
                     .collect();
                 let mut any = false;
-                for pack in &b.packs.installed {
-                    let sounds: Vec<_> = pack.sounds.iter().filter(|s| s.kind == kind).collect();
+                for category in library::CATEGORIES.iter().copied().chain(["Other"]) {
+                    let sounds: Vec<_> = b
+                        .packs
+                        .installed
+                        .iter()
+                        .flat_map(|p| p.sounds.iter().map(move |s| (p, s)))
+                        .filter(|(p, s)| s.kind == kind && library::category_of(p, s) == category)
+                        .collect();
                     if sounds.is_empty() {
                         continue;
                     }
                     any = true;
-                    section_label(ui, &pack.name);
-                    for s in sounds {
+                    section_label(ui, category);
+                    for (pack, s) in sounds {
                         let id = s.sound_id(&pack.id);
                         let sel = id.is_some() && current == id.as_deref();
-                        if sound_row(ui, icon, &s.name, &s.caption, sel) {
+                        let caption = if s.caption.is_empty() {
+                            pack.name.clone()
+                        } else {
+                            format!("{} · {}", s.caption, pack.name)
+                        };
+                        if sound_row(ui, icon, &s.name, &caption, sel) {
                             match id {
                                 Some(id) => picked = Some((id, s.name.clone())),
                                 None => {
