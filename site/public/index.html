@@ -7,174 +7,166 @@
 <meta name="description" content="Oxbeat is a free, open-source music studio for Windows, macOS and Linux. Plug in a keyboard and play, record your voice, add effects, mix and export your song. No account, no subscription.">
 <link rel="canonical" href="https://oxbeat.it/">
 <link rel="icon" type="image/png" href="/img/icon.png">
-<meta name="theme-color" content="#131417">
+<meta name="theme-color" content="#f1efe9">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://oxbeat.it/">
 <meta property="og:title" content="Oxbeat — open it and make music">
-<meta property="og:description" content="A free, friendly music studio for Windows, macOS and Linux. No account, no subscription.">
+<meta property="og:description" content="A free music studio for Windows, macOS and Linux. No account, no subscription.">
 <meta property="og:image" content="https://oxbeat.it/img/editor.png">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="preload" href="/fonts/Inter-Regular.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="preload" href="/fonts/SchibstedGrotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
-<svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <defs>
-    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
-    <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 3l14 9-14 9z"/></symbol>
-    <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
-    <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 8 12 3 3 8l9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></symbol>
-    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></symbol>
-    <symbol id="i-pen" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
-    <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"/></symbol>
-    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
-    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
-    <symbol id="i-share" viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="m16 6-4-4-4 4"/><path d="M12 2v13"/></symbol>
-    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></symbol>
-    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></symbol>
-    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
-    <symbol id="i-github" viewBox="0 0 24 24"><path stroke="none" fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></symbol>
-  </defs>
-</svg>
-
-<header class="nav">
-  <div class="wrap nav-inner">
-    <a class="brand" href="#top" aria-label="Oxbeat home"><img src="/img/icon.png" alt="" width="28" height="28"><span>Oxbeat</span></a>
-    <nav class="nav-links" aria-label="Sections">
-      <a href="#features">Features</a>
-      <a href="#screens">Tour</a>
-      <a href="#packs">Sound packs</a>
-      <a href="https://github.com/matthias-peterlini/Oxbeat"><svg class="ic"><use href="#i-github"/></svg><span class="hide-sm">GitHub</span></a>
+<header class="top">
+  <div class="wrap top-row">
+    <a class="mark" href="/" aria-label="Oxbeat home"><img src="/img/icon.png" alt="" width="26" height="26">Oxbeat</a>
+    <nav class="top-nav" aria-label="Sections">
+      <a href="#play">Try it</a>
+      <a href="#inside">Features</a>
+      <a href="#packs">Sounds</a>
+      <a href="https://github.com/matthias-peterlini/Oxbeat">GitHub</a>
     </nav>
-    <a class="btn btn-small" href="#download">Download</a>
+    <a class="top-cta" href="#download">Download</a>
   </div>
 </header>
 
-<main id="top">
+<main>
 
-  <section class="hero">
-    <div class="wrap hero-inner">
-      <p class="pill"><span class="dot"></span>Free and open source · v0.2.0</p>
-      <h1>Open it and<br><span class="grad">make music.</span></h1>
-      <p class="lead">A friendly music studio for Windows, macOS and Linux. Plug in a keyboard and play, sing into a microphone, add effects, mix, and share your song. No account, no subscription, no setup screen.</p>
-      <div class="cta">
-        <a class="btn" id="hero-download" href="#download"><svg class="ic"><use href="#i-download"/></svg><span>Download Oxbeat</span></a>
-        <a class="btn btn-ghost" href="https://github.com/matthias-peterlini/Oxbeat"><svg class="ic"><use href="#i-github"/></svg>View the code</a>
+  <section class="hero wrap">
+    <p class="meta"><span>Version 0.2.0</span><span>Free and open source</span><span>Windows, macOS, Linux</span></p>
+    <h1><span class="sr">O</span><span class="o-logo" aria-hidden="true"><svg viewBox="84 84 344 344"><circle class="disc" cx="256" cy="256" r="128"/><circle class="ring" cx="256" cy="256" r="150"/><g class="bars"><rect x="153" y="221" width="30" height="70"/><rect x="197" y="186" width="30" height="140"/><rect x="241" y="151" width="30" height="210"/><rect x="285" y="186" width="30" height="140"/><rect x="329" y="211" width="30" height="90"/></g></svg></span>pen it and<br>make music.</h1>
+    <div class="hero-foot">
+      <p class="lead">A music studio for people who'd rather play than read a manual. Plug in a keyboard, sing into a microphone, add some reverb, export an MP3. That's it.</p>
+      <div class="hero-actions">
+        <a class="button" id="hero-dl" href="#download">
+          <span class="button-label">Download Oxbeat</span>
+          <span class="button-sub" id="hero-dl-sub">Free · no account needed</span>
+        </a>
+        <a class="link" href="https://github.com/matthias-peterlini/Oxbeat">Read the source code<span aria-hidden="true"> ↗</span></a>
       </div>
-      <p class="fine">Windows 10/11 · macOS (Apple Silicon and Intel) · Linux AppImage and .deb</p>
     </div>
-    <div class="wrap hero-shot">
-      <div class="eq" aria-hidden="true"></div>
-      <figure class="window shot-hero">
-        <div class="window-bar"><i></i><i></i><i></i></div>
-        <img src="/img/editor.png" width="1200" height="760" alt="Oxbeat with a piano roll open, editing the notes of a clip">
-      </figure>
-    </div>
-  </section>
-
-  <section class="steps wrap" aria-label="How it works">
-    <div class="step"><span class="step-n">1</span><svg class="ic"><use href="#i-plug"/></svg><div><h3>Plug in</h3><p>Any MIDI keyboard works straight away. No keyboard? Use your computer keys or the on-screen pads.</p></div></div>
-    <div class="step"><span class="step-n">2</span><svg class="ic"><use href="#i-play"/></svg><div><h3>Play</h3><p>The first thing you see is a track that already makes sound. Press R and you're recording.</p></div></div>
-    <div class="step"><span class="step-n">3</span><svg class="ic"><use href="#i-share"/></svg><div><h3>Share</h3><p>Export the finished song as an MP3 to send to friends, or a WAV in full quality.</p></div></div>
-  </section>
-
-  <section id="features" class="section wrap">
-    <div class="section-head">
-      <p class="kicker">Everything you need</p>
-      <h2>A whole studio, without the learning curve.</h2>
-    </div>
-    <div class="grid">
-      <article class="card" style="--c:#5b8cff"><svg class="ic"><use href="#i-play"/></svg><h3>Play</h3><p>Plug in a MIDI keyboard and it just works, or play from the computer keyboard, on-screen keys and drum pads.</p></article>
-      <article class="card" style="--c:#34c38f"><svg class="ic"><use href="#i-music"/></svg><h3>Sounds</h3><p>Built-in synths and drum kits, plus a browser that loads SoundFont (SF2), SFZ and plain audio files.</p></article>
-      <article class="card" style="--c:#f59e0b"><svg class="ic"><use href="#i-box"/></svg><h3>Sound packs</h3><p>Download free pianos, drums, saxophones, flutes and a full General MIDI set from inside the app.</p></article>
-      <article class="card" style="--c:#ef4444"><svg class="ic"><use href="#i-mic"/></svg><h3>Record</h3><p>Record what you play as notes, or your voice and guitar through a microphone, with a level meter and monitoring.</p></article>
-      <article class="card" style="--c:#a78bfa"><svg class="ic"><use href="#i-pen"/></svg><h3>Edit</h3><p>Move, stretch, split and duplicate clips. Fix notes in a piano roll, program beats on a drum grid, quantize in one click.</p></article>
-      <article class="card" style="--c:#f472b6"><svg class="ic"><use href="#i-wave"/></svg><h3>Effects</h3><p>Reverb, delay, EQ, compressor, distortion, chorus, gate, de-esser and pitch correction, with one-click vocal presets.</p></article>
-      <article class="card" style="--c:#22d3ee"><svg class="ic"><use href="#i-sliders"/></svg><h3>Mix</h3><p>Faders, pan and meters for every track, and a master limiter so a loud song never distorts.</p></article>
-      <article class="card" style="--c:#5b8cff"><svg class="ic"><use href="#i-clock"/></svg><h3>Stay in time</h3><p>A metronome, a count-in before you record, and a loop range for practising one section over and over.</p></article>
-      <article class="card" style="--c:#34c38f"><svg class="ic"><use href="#i-share"/></svg><h3>Share</h3><p>Export the whole song as MP3 or WAV, with the reverb and echo tails left to ring out.</p></article>
-      <article class="card" style="--c:#f59e0b"><svg class="ic"><use href="#i-undo"/></svg><h3>Relax</h3><p>Undo and redo everything. Try ideas freely: nothing you do is permanent.</p></article>
-    </div>
-  </section>
-
-  <section id="screens" class="section wrap">
-    <div class="section-head">
-      <p class="kicker">Take the tour</p>
-      <h2>Clear screens, big controls.</h2>
-    </div>
-    <div class="tabs" role="tablist" aria-label="Screens">
-      <button role="tab" aria-selected="true" aria-controls="shot" data-img="beats" data-alt="The arrangement: keys, drums and voice tracks, with a drum clip">Tracks</button>
-      <button role="tab" aria-selected="false" aria-controls="shot" data-img="editor" data-alt="The piano roll, with notes drawn on a grid">Piano roll</button>
-      <button role="tab" aria-selected="false" aria-controls="shot" data-img="effects" data-alt="A chain of effects with large knobs">Effects</button>
-      <button role="tab" aria-selected="false" aria-controls="shot" data-img="mixer" data-alt="The mixer with a fader and meter for every track">Mixer</button>
-    </div>
-    <figure class="window" id="shot" role="tabpanel">
-      <div class="window-bar"><i></i><i></i><i></i></div>
-      <img id="shot-img" src="/img/beats.png" width="1200" height="760" alt="The arrangement: keys, drums and voice tracks, with a drum clip" loading="lazy">
+    <figure class="hero-shot">
+      <img src="/img/editor.png" width="1200" height="760" alt="Oxbeat: four tracks in the arrangement and the piano roll open on a keys clip">
     </figure>
-    <p class="caption" id="shot-caption">Lay out your song: every instrument and voice gets its own lane of clips.</p>
   </section>
 
-  <section class="section wrap free">
-    <div class="free-text">
-      <p class="kicker">Free, for real</p>
-      <h2>No account. No subscription. No catch.</h2>
-      <p>Oxbeat is free software under the GNU GPL. Nobody can take it away from you, lock your songs behind a paywall or show you ads. Your project is a plain folder on your computer, with your recordings inside.</p>
-      <ul class="checks">
-        <li><svg class="ic"><use href="#i-check"/></svg>Works offline, no sign-in</li>
-        <li><svg class="ic"><use href="#i-check"/></svg>The same app on Windows, macOS and Linux</li>
-        <li><svg class="ic"><use href="#i-check"/></svg>Written in Rust, with a real-time audio engine built for low latency</li>
-        <li><svg class="ic"><use href="#i-check"/></svg>Open code anyone can read, fix and improve</li>
+  <section id="play" class="band band-dark">
+    <div class="wrap play">
+      <div class="play-text">
+        <h2>Your computer is already a piano.</h2>
+        <p>In Oxbeat the letters on your keyboard play notes, so you can start a song before you own any gear. Try it right here: press <kbd>A</kbd> to <kbd>K</kbd>, or tap the keys. <kbd>Z</kbd> and <kbd>X</kbd> change octave.</p>
+        <p class="play-status" aria-live="polite"><span id="play-note"></span><span id="play-octave">Octave 4</span></p>
+      </div>
+      <div class="piano" id="piano" role="group" aria-label="Playable piano keyboard">
+        <button class="key white" data-note="0" data-key="a">A</button>
+        <button class="key black" data-note="1" data-key="w">W</button>
+        <button class="key white" data-note="2" data-key="s">S</button>
+        <button class="key black" data-note="3" data-key="e">E</button>
+        <button class="key white" data-note="4" data-key="d">D</button>
+        <button class="key white" data-note="5" data-key="f">F</button>
+        <button class="key black" data-note="6" data-key="t">T</button>
+        <button class="key white" data-note="7" data-key="g">G</button>
+        <button class="key black" data-note="8" data-key="y">Y</button>
+        <button class="key white" data-note="9" data-key="h">H</button>
+        <button class="key black" data-note="10" data-key="u">U</button>
+        <button class="key white" data-note="11" data-key="j">J</button>
+        <button class="key white" data-note="12" data-key="k">K</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="inside" class="wrap inside">
+    <div class="inside-head">
+      <h2>A whole studio, none of the homework.</h2>
+      <p>The first thing you see is a track that already makes sound. Everything else is one click away.</p>
+    </div>
+    <ol class="specs">
+      <li><h3>Play</h3><p>Plug in a MIDI keyboard and it just works. No keyboard? Use the computer keys or the on-screen keys and drum pads.</p></li>
+      <li><h3>Record</h3><p>Record what you play as notes, or your voice and guitar through a microphone, with a level meter and monitoring.</p></li>
+      <li><h3>Sounds</h3><p>Built-in synths and drum kits. Load SoundFont (SF2), SFZ and plain audio files from your own disk.</p></li>
+      <li><h3>Edit</h3><p>Move, stretch, split and duplicate clips. Fix notes in the piano roll, program beats on a drum grid, quantize in one click.</p></li>
+      <li><h3>Effects</h3><p>Reverb, delay, EQ, compressor, distortion, chorus, gate, de-esser and pitch correction, plus one-click vocal presets.</p></li>
+      <li><h3>Mix</h3><p>A fader, pan and meter for every track, and a limiter on the master so a loud song never distorts.</p></li>
+      <li><h3>Keep time</h3><p>Metronome, a one-bar count-in before you record, and a loop range for practising a section.</p></li>
+      <li><h3>Share</h3><p>Export the song as MP3 for friends or WAV in full quality, with reverb and echo left to ring out.</p></li>
+      <li><h3>Undo</h3><p>Every change can be undone and redone, so trying an idea never costs you anything.</p></li>
+      <li><h3>Own it</h3><p>A project is a plain folder holding a readable project file and your recordings. Nothing lives in a cloud.</p></li>
+    </ol>
+  </section>
+
+  <section class="wrap tour" aria-label="Screens">
+    <figure class="tour-item">
+      <img src="/img/effects.png" width="1200" height="760" loading="lazy" alt="The effects of a voice track: pitch correction, de-esser, compressor and delay, each with knobs">
+      <figcaption><h3>Make your voice sound finished.</h3><p>Pick a vocal preset or build your own chain. Sound flows left to right; drag a knob, double-click it to reset.</p></figcaption>
+    </figure>
+    <figure class="tour-item flip">
+      <img src="/img/mixer.png" width="1200" height="760" loading="lazy" alt="The mixer, with a fader and level meter for each track and the master">
+      <figcaption><h3>Balance everything in one place.</h3><p>Every track gets a fader, pan and meter. The master limiter catches the peaks, so the export never clips.</p></figcaption>
+    </figure>
+    <figure class="tour-item">
+      <img src="/img/beats.png" width="1200" height="760" loading="lazy" alt="The arrangement with keys, drums and voice tracks and a drum clip">
+      <figcaption><h3>Lay out the song.</h3><p>Each instrument and voice gets its own lane. Drag clips to move them, pull an edge to stretch, double-click to open the notes.</p></figcaption>
+    </figure>
+  </section>
+
+  <section class="band band-blue">
+    <div class="wrap free">
+      <p class="free-big">€0.<br>Not a trial.</p>
+      <ul class="free-list">
+        <li><strong>No account.</strong> Open the app and play. It works offline.</li>
+        <li><strong>No subscription, no ads.</strong> Nothing is locked behind a paywall.</li>
+        <li><strong>GPL licensed.</strong> Anyone can read the code, fix it and share it. Nobody can take it away.</li>
       </ul>
     </div>
-    <figure class="window free-shot">
-      <div class="window-bar"><i></i><i></i><i></i></div>
-      <img src="/img/mixer.png" width="1200" height="760" alt="The Oxbeat mixer" loading="lazy">
-    </figure>
   </section>
 
-  <section id="packs" class="section wrap">
-    <div class="section-head">
-      <p class="kicker">Sound packs</p>
+  <section id="packs" class="wrap packs">
+    <div class="packs-head">
       <h2>More instruments, one click away.</h2>
-      <p class="sub">Open <strong>Add Track → Store</strong> inside Oxbeat and install any of these. Every pack is free to use in your own music and ships with its licence.</p>
+      <p>Open <b>Add Track → Store</b> in Oxbeat to install these free sound packs. Each one is free to use in your own music and comes with its licence.</p>
     </div>
-    <div class="packs">
-      <div class="pack" style="--c:#5b8cff"><span class="pack-tag">Complete set</span><h3>GeneralUser GS</h3><p>Pianos, guitars, strings, brass, synths and drum kits in one small bank.</p></div>
-      <div class="pack" style="--c:#f59e0b"><span class="pack-tag">Drums</span><h3>Sam's Sonor Drums</h3><p>A real Sonor Force 3001 kit, recorded with several velocity layers.</p></div>
-      <div class="pack" style="--c:#f472b6"><span class="pack-tag">Woodwinds</span><h3>MTG Solo Saxophones</h3><p>Soprano, alto, tenor and baritone saxophones played note by note.</p></div>
-      <div class="pack" style="--c:#34c38f"><span class="pack-tag">Woodwinds</span><h3>Ixox Flute</h3><p>A soft, breathy concert flute.</p></div>
-      <div class="pack" style="--c:#a78bfa"><span class="pack-tag">Synths</span><h3>Cowsynth</h3><p>Quirky sample-based synth organs, pads and plucks.</p></div>
+    <div class="table-scroll">
+      <table class="table">
+        <thead><tr><th>Pack</th><th>What it is</th><th>Licence</th><th>By</th></tr></thead>
+        <tbody>
+          <tr><td>GeneralUser GS</td><td>Pianos, guitars, strings, brass, synths and drum kits in one small bank</td><td>GeneralUser GS v2.0</td><td>S. Christian Collins</td></tr>
+          <tr><td>Sam's Sonor Drums</td><td>A real Sonor Force 3001 kit, recorded with several velocity layers</td><td>CC BY-SA 4.0</td><td>Sam Greene</td></tr>
+          <tr><td>MTG Solo Saxophones</td><td>Soprano, alto, tenor and baritone saxophones played note by note</td><td>CC BY 4.0</td><td>Music Technology Group, UPF</td></tr>
+          <tr><td>Ixox Flute</td><td>A soft, breathy concert flute</td><td>CC BY 4.0</td><td>Xavier Hosxe</td></tr>
+          <tr><td>Cowsynth</td><td>Quirky sample-based synth organs, pads and plucks</td><td>CC0 1.0</td><td>Karoryfer Samples</td></tr>
+        </tbody>
+      </table>
     </div>
-    <p class="more"><a href="https://github.com/matthias-peterlini/Oxbeat-beats">See all packs and their licences →</a></p>
+    <p class="packs-more"><a class="link" href="https://github.com/matthias-peterlini/Oxbeat-beats">All packs and their sources<span aria-hidden="true"> ↗</span></a></p>
   </section>
 
-  <section id="download" class="section wrap download">
-    <div class="section-head center">
-      <p class="kicker">Download</p>
-      <h2>Get Oxbeat for your computer.</h2>
-      <p class="sub">Pick your system and download the installer from the releases page.</p>
+  <section id="download" class="band band-dark">
+    <div class="wrap download">
+      <div class="dl-head"><img class="dl-icon" src="/img/icon.png" width="112" height="112" alt="The Oxbeat app icon"><h2>Download Oxbeat <span id="dl-version">0.2.0</span></h2></div>
+      <ul class="downloads">
+        <li data-os="windows"><span class="dl-os">Windows</span><span class="dl-what">Windows 10 and 11 · installer</span><a class="dl-get" href="https://github.com/matthias-peterlini/Oxbeat/releases/latest">Download <span class="dl-size"></span></a></li>
+        <li data-os="mac-arm"><span class="dl-os">macOS</span><span class="dl-what">Apple Silicon (M1 and newer) · disk image</span><a class="dl-get" href="https://github.com/matthias-peterlini/Oxbeat/releases/latest">Download <span class="dl-size"></span></a></li>
+        <li data-os="mac-intel"><span class="dl-os">macOS</span><span class="dl-what">Intel Macs · disk image</span><a class="dl-get" href="https://github.com/matthias-peterlini/Oxbeat/releases/latest">Download <span class="dl-size"></span></a></li>
+        <li data-os="linux"><span class="dl-os">Linux</span><span class="dl-what">Any distribution · AppImage</span><a class="dl-get" href="https://github.com/matthias-peterlini/Oxbeat/releases/latest">Download <span class="dl-size"></span></a></li>
+        <li data-os="deb"><span class="dl-os">Linux</span><span class="dl-what">Debian and Ubuntu · .deb package</span><a class="dl-get" href="https://github.com/matthias-peterlini/Oxbeat/releases/latest">Download <span class="dl-size"></span></a></li>
+      </ul>
+      <p class="dl-note">The installers aren't code-signed yet, so your computer asks once before the first launch. On Windows choose <b>More info → Run anyway</b>. On macOS right-click the app and choose <b>Open</b>.</p>
     </div>
-    <div class="platforms">
-      <a class="platform" data-os="windows" href="https://github.com/matthias-peterlini/Oxbeat/releases"><h3>Windows</h3><p>Windows 10 and 11</p><span>.exe installer</span></a>
-      <a class="platform" data-os="mac" href="https://github.com/matthias-peterlini/Oxbeat/releases"><h3>macOS</h3><p>Apple Silicon (M1 and newer)</p><span>.dmg · aarch64</span></a>
-      <a class="platform" data-os="mac-intel" href="https://github.com/matthias-peterlini/Oxbeat/releases"><h3>macOS</h3><p>Intel Macs</p><span>.dmg · x86_64</span></a>
-      <a class="platform" data-os="linux" href="https://github.com/matthias-peterlini/Oxbeat/releases"><h3>Linux</h3><p>Any distribution, or Debian and Ubuntu</p><span>.AppImage · .deb</span></a>
-    </div>
-    <p class="note">The installers aren't code-signed yet, so your computer asks before the first launch. On Windows click <strong>More info → Run anyway</strong>; on macOS right-click the app and choose <strong>Open</strong>.</p>
   </section>
 
 </main>
 
-<footer class="footer">
-  <div class="wrap footer-inner">
-    <div class="brand"><img src="/img/icon.png" alt="" width="22" height="22"><span>Oxbeat</span></div>
+<footer class="wrap foot">
+  <p class="foot-mark"><span class="sr">O</span><span class="o-logo" aria-hidden="true"><svg viewBox="84 84 344 344"><circle class="disc" cx="256" cy="256" r="128"/><circle class="ring" cx="256" cy="256" r="150"/><g class="bars"><rect x="153" y="221" width="30" height="70"/><rect x="197" y="186" width="30" height="140"/><rect x="241" y="151" width="30" height="210"/><rect x="285" y="186" width="30" height="140"/><rect x="329" y="211" width="30" height="90"/></g></svg></span>xbeat</p>
+  <div class="foot-row">
     <p>Free software under the GNU GPL v3.0 or later.</p>
     <nav aria-label="Links">
       <a href="https://github.com/matthias-peterlini/Oxbeat">Source code</a>
       <a href="https://github.com/matthias-peterlini/Oxbeat-beats">Sound packs</a>
       <a href="https://github.com/matthias-peterlini/Oxbeat/issues">Report a problem</a>
+      <a href="https://github.com/matthias-peterlini/Oxbeat/releases">All releases</a>
     </nav>
   </div>
 </footer>
