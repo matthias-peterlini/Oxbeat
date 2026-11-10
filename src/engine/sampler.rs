@@ -75,7 +75,8 @@ impl SampleData {
         }
     }
 
-    /// Heap bytes of sample data.
+    /// Heap bytes of sample data (used by the cache budget in a later task).
+    #[allow(dead_code)]
     pub fn bytes(&self) -> usize {
         match &self.frames {
             Frames::Stereo(v) => v.len() * 4,
