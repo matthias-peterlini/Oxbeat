@@ -20,11 +20,27 @@ const LIST_HEIGHT: f32 = 340.0;
 /// A SoundFont to pick a preset from: (file, (pack id, file in pack), display name).
 type PresetRequest = (PathBuf, Option<(String, String)>, String);
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Tab {
     BuiltIn,
     Library,
     Store,
+}
+
+/// Where Add Track opens, and the sound it marks as the default (the first
+/// Library row when Essentials is installed, the built-in synth otherwise).
+fn new_track_defaults(drums: bool, essentials_installed: bool) -> (Tab, &'static str) {
+    let tab = if essentials_installed {
+        Tab::Library
+    } else {
+        Tab::BuiltIn
+    };
+    let sound = if drums {
+        sounds::default_kit(essentials_installed)
+    } else {
+        sounds::default_instrument(essentials_installed)
+    };
+    (tab, sound)
 }
 
 #[derive(Clone, PartialEq)]
@@ -79,7 +95,12 @@ impl Browser {
         self.open = true;
         self.page = Page::TrackType;
         self.target = Target::NewTrack;
+        self.tab = new_track_defaults(false, self.essentials_installed()).0;
         self.filter.clear();
+    }
+
+    fn essentials_installed(&self) -> bool {
+        self.packs.is_installed(essentials::ID).is_some()
     }
 
     /// Open the sound list for an existing track.
@@ -357,7 +378,12 @@ pub fn show(ctx: &egui::Context, studio: &mut Studio, b: &mut Browser) {
             .track(id)
             .and_then(|t| t.sound())
             .map(str::to_string),
-        Target::NewTrack => None,
+        // A new track marks the default sound for its kind.
+        Target::NewTrack => Some(
+            new_track_defaults(b.drums, b.essentials_installed())
+                .1
+                .to_string(),
+        ),
     };
     let r = egui::Modal::new(egui::Id::unique("sound-browser"))
         .frame(
@@ -747,6 +773,23 @@ mod tests {
             r#"{{"id":"p","name":"{name}","author":"Ann","license":"CC0","homepage":"{homepage}","sounds":[]}}"#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn new_tracks_default_to_essentials_when_installed() {
+        assert_eq!(
+            new_track_defaults(false, true),
+            (Tab::Library, "pack:essentials/Grand Piano.sfz")
+        );
+        assert_eq!(
+            new_track_defaults(true, true),
+            (Tab::Library, "pack:essentials/Drums.sfz")
+        );
+        assert_eq!(new_track_defaults(false, false), (Tab::BuiltIn, "Keys"));
+        assert_eq!(
+            new_track_defaults(true, false),
+            (Tab::BuiltIn, "Studio Kit")
+        );
     }
 
     #[test]
