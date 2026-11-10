@@ -1,0 +1,14 @@
+{
+  // The oxbeat.it website: static files only, served by Workers Static Assets.
+  // Deploy with `npx wrangler deploy` from this folder.
+  "name": "oxbeat-site",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    { "pattern": "oxbeat.it", "custom_domain": true },
+    { "pattern": "www.oxbeat.it", "custom_domain": true }
+  ]
+}

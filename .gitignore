@@ -1,2 +1,5 @@
 .superpowers/
 /target
+
+# Wrangler (website preview and deploy)
+.wrangler/

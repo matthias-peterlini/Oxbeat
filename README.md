@@ -12,6 +12,7 @@ A free, friendly music studio for Windows, macOS and Linux.
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)
 
+[Website](https://oxbeat.it) ·
 [Download](https://github.com/matthias-peterlini/Oxbeat/releases) ·
 [Sound packs](https://github.com/matthias-peterlini/Oxbeat-beats) ·
 [Build from source](#build-from-source)
@@ -117,6 +118,12 @@ MIDI go through [cpal](https://github.com/RustAudio/cpal) and
 and never allocates, locks or touches the disk there; everything heavy is prepared elsewhere
 and handed over through lock-free queues. A project is a folder (`MySong.oxbeat`) holding a
 readable `project.json` and your recordings.
+
+## Website
+
+The site at [oxbeat.it](https://oxbeat.it) lives in [`site/`](site): plain HTML and CSS served
+by a Cloudflare Worker. Preview it with `npx wrangler dev --config site/wrangler.jsonc` and
+publish it with `npx wrangler deploy` from the `site` folder.
 
 ## Contributing
 
