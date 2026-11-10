@@ -5,6 +5,7 @@ pub mod commands;
 pub mod drums;
 pub mod fx;
 pub mod instrument;
+pub mod metronome;
 pub mod sampler;
 pub mod synth;
 pub mod transport;
@@ -16,7 +17,7 @@ use fx::Chain;
 use fx::dynamics::Limiter;
 use instrument::{Instrument, sound_hash};
 use sampler::SampleData;
-use transport::{beat_to_sample, sample_to_beat};
+use transport::{beat_to_sample, sample_to_beat, samples_per_beat};
 
 use crate::project::{Note, Project, Track};
 
@@ -62,6 +63,14 @@ pub struct Engine {
     /// Effect chains, by track id.
     fx: Vec<(u64, Box<Chain>)>,
     limiter: Limiter,
+    metronome: bool,
+    click: metronome::Click,
+    /// Samples of count-in still to go before `pending_record` starts.
+    count_in: u64,
+    count_total: u64,
+    pending_record: Option<u64>,
+    /// Beats to play round and round.
+    loop_region: Option<(f64, f64)>,
     playing: bool,
     pos: u64,
     recording: Option<Recording>,
@@ -86,6 +95,12 @@ impl Engine {
             audio: Vec::with_capacity(MAX_AUDIO_CLIPS),
             fx: Vec::with_capacity(MAX_TRACKS),
             limiter: Limiter::new(sample_rate as f32),
+            metronome: false,
+            click: metronome::Click::new(sample_rate),
+            count_in: 0,
+            count_total: 0,
+            pending_record: None,
+            loop_region: None,
             playing: false,
             pos: 0,
             recording: None,
@@ -199,8 +214,46 @@ impl Engine {
         }
     }
 
+    fn begin_record(&mut self, track: u64) {
+        let audio = self.project.track(track).is_some_and(Track::is_audio);
+        // Note takes become whole-bar clips; a voice take starts right here.
+        let start_beat = if audio {
+            self.beat()
+        } else {
+            (self.beat() / BEATS_PER_BAR).floor() * BEATS_PER_BAR
+        };
+        self.recording = Some(Recording {
+            track,
+            start_beat,
+            audio,
+            held: [None; 128],
+        });
+        self.playing = true;
+    }
+
+    /// The loop as samples, while it applies (never during a take).
+    fn active_loop(&self) -> Option<(u64, u64)> {
+        let (from, to) = self.loop_region?;
+        if !self.playing || self.recording.is_some() {
+            return None;
+        }
+        let tempo = self.project.tempo_bpm;
+        let start = beat_to_sample(from, tempo, self.sample_rate);
+        let end = beat_to_sample(to, tempo, self.sample_rate);
+        (end > start).then_some((start, end))
+    }
+
     fn stop(&mut self) {
         let beat = self.beat();
+        if let Some(track) = self.pending_record.take() {
+            // Stopped during the count-in: the take is over before it began.
+            self.count_in = 0;
+            self.send(EngineEvent::RecordFinished {
+                track,
+                start_beat: beat,
+                length_beats: 0.0,
+            });
+        }
         if let Some(rec) = self.recording.take() {
             for (pitch, held) in rec.held.iter().enumerate() {
                 if let Some((start, velocity)) = held {
@@ -323,28 +376,27 @@ impl Engine {
             }
             EngineCommand::Play => self.playing = true,
             EngineCommand::Stop => self.stop(),
-            EngineCommand::Record { track } => {
-                if self.recording.is_some() {
+            EngineCommand::Record { track, count_in } => {
+                if self.recording.is_some() || self.pending_record.is_some() {
                     return;
                 }
-                let audio = self.project.track(track).is_some_and(Track::is_audio);
-                // Note takes become whole-bar clips; a voice take starts right here.
-                let start_beat = if audio {
-                    self.beat()
+                if count_in {
+                    let bar =
+                        samples_per_beat(self.project.tempo_bpm, self.sample_rate) * BEATS_PER_BAR;
+                    self.playing = false;
+                    self.all_off();
+                    self.pending_record = Some(track);
+                    self.count_total = (bar.round() as u64).max(1);
+                    self.count_in = self.count_total;
                 } else {
-                    (self.beat() / BEATS_PER_BAR).floor() * BEATS_PER_BAR
-                };
-                self.recording = Some(Recording {
-                    track,
-                    start_beat,
-                    audio,
-                    held: [None; 128],
-                });
-                self.playing = true;
+                    self.begin_record(track);
+                }
             }
+            EngineCommand::SetMetronome(on) => self.metronome = on,
+            EngineCommand::SetLoop(region) => self.loop_region = region,
             EngineCommand::Locate(beat) => {
                 // Jumping mid-take would corrupt the recording.
-                if self.recording.is_some() {
+                if self.recording.is_some() || self.pending_record.is_some() {
                     return;
                 }
                 self.all_off();
@@ -365,13 +417,26 @@ impl Engine {
         let frames = out.len() / channels;
         let mut done = 0;
         while done < frames {
-            let n = CHUNK.min(frames - done);
+            // Chunks stop exactly where the count-in ends or the loop turns round.
+            let mut n = CHUNK.min(frames - done);
+            let turn = self.active_loop().filter(|(_, end)| self.pos < *end);
+            if self.count_in > 0 {
+                n = n.min(self.count_in as usize);
+            } else if let Some((_, end)) = turn {
+                n = n.min((end - self.pos) as usize);
+            }
             self.render_chunk(
                 &mut out[done * channels..(done + n) * channels],
                 n,
                 channels,
             );
             done += n;
+            if let Some((start, end)) = turn
+                && self.pos >= end
+            {
+                self.pos = start;
+                self.all_off();
+            }
         }
         for s in out.iter_mut() {
             *s = s.clamp(-1.0, 1.0);
@@ -503,6 +568,46 @@ impl Engine {
             peaks[1] = peaks[1].max(frame[used - 1].abs());
         }
         self.meters.raise_master(peaks);
+
+        // The metronome is for the player, so it sits on top of the mix.
+        let mut tick = None;
+        if self.count_in > 0 {
+            let beat = samples_per_beat(tempo, sr).round().max(1.0) as u64;
+            let elapsed = self.count_total - self.count_in;
+            let wait = (beat - elapsed % beat) % beat;
+            if wait < n as u64 {
+                tick = Some((wait as usize, elapsed + wait == 0));
+            }
+        } else if self.playing && self.metronome {
+            let next = (sample_to_beat(start, tempo, sr) - 1e-9).ceil().max(0.0);
+            let at = beat_to_sample(next, tempo, sr);
+            if at >= start && at < end {
+                tick = Some(((at - start) as usize, next % BEATS_PER_BAR == 0.0));
+            }
+        }
+        if tick.is_some() || !self.click.is_silent() {
+            for (i, frame) in out.chunks_exact_mut(channels).enumerate() {
+                if let Some((at, accent)) = tick
+                    && at == i
+                {
+                    self.click.trigger(accent);
+                }
+                let c = self.click.next();
+                for x in &mut frame[..channels.min(2)] {
+                    *x += c;
+                }
+            }
+        }
+
+        if self.count_in > 0 {
+            self.count_in -= (n as u64).min(self.count_in);
+            if self.count_in == 0
+                && let Some(track) = self.pending_record.take()
+            {
+                self.begin_record(track);
+            }
+            return;
+        }
 
         if self.playing {
             self.pos = end;

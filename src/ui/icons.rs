@@ -22,3 +22,7 @@ pub const POWER: &str = "\u{e140}";
 pub const PENCIL: &str = "\u{e1f9}";
 pub const UNDO: &str = "\u{e2a1}";
 pub const REDO: &str = "\u{e2a0}";
+pub const METRONOME: &str = "\u{e6bc}";
+pub const COUNT_IN: &str = "\u{e1e0}";
+pub const REPEAT: &str = "\u{e146}";
+pub const DOWNLOAD: &str = "\u{e0b2}";

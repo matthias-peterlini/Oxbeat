@@ -25,6 +25,9 @@ const COARSE_GRID: f64 = 1.0;
 const FINE_GRID: f64 = 0.25;
 /// Width of the strip at a clip's right edge that stretches it.
 const TRIM_HANDLE: f32 = 7.0;
+/// The loop range sits in the top of the ruler.
+const LOOP_BAND_HEIGHT: f32 = 8.0;
+const LOOP_COLOR: Color32 = Color32::from_rgb(0xf5, 0x9e, 0x0b);
 /// Length of a clip made by double-clicking an empty lane.
 const NEW_CLIP_BEATS: f64 = 8.0;
 
@@ -280,6 +283,61 @@ fn grid(ui: &Ui, lanes: Rect) {
     }
 }
 
+/// The loop range on the ruler: drag it to move it, drag an end to resize it.
+fn loop_band(ui: &mut Ui, studio: &mut Studio, ruler: Rect) {
+    let (from, to) = studio.loop_region;
+    let x = |beat: f64| ruler.left() + beat as f32 * PX_PER_BEAT;
+    let band = Rect::from_min_max(
+        pos2(x(from), ruler.top() + 1.0),
+        pos2(x(to), ruler.top() + LOOP_BAND_HEIGHT),
+    );
+    let id = ui.scope_id().with("loop");
+    let beat_at = |p: egui::Pos2| ((p.x - ruler.left()) / PX_PER_BEAT) as f64;
+    let body = ui
+        .interact(band, id, Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::Grab);
+    let grip =
+        |at: f32| Rect::from_min_max(pos2(at - 5.0, band.top()), pos2(at + 5.0, band.bottom()));
+    let left = ui
+        .interact(grip(band.left()), id.with("from"), Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let right = ui
+        .interact(grip(band.right()), id.with("to"), Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    if body.drag_started()
+        && let Some(p) = body.interact_pointer_pos()
+    {
+        ui.data_mut(|d| d.insert_temp(id, beat_at(p) - from));
+    }
+    if body.dragged()
+        && let Some(p) = body.interact_pointer_pos()
+    {
+        let grab = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(0.0);
+        let start = snap(beat_at(p) - grab, COARSE_GRID).max(0.0);
+        studio.set_loop_region(start, start + (to - from));
+    } else if left.dragged()
+        && let Some(p) = left.interact_pointer_pos()
+    {
+        let start = snap(beat_at(p), COARSE_GRID).clamp(0.0, to - 1.0);
+        studio.set_loop_region(start, to);
+    } else if right.dragged()
+        && let Some(p) = right.interact_pointer_pos()
+    {
+        studio.set_loop_region(from, snap(beat_at(p), COARSE_GRID));
+    }
+    let painter = ui.painter_at(ruler);
+    painter.rect_filled(band, 3, LOOP_COLOR.gamma_multiply(0.85));
+    for edge in [band.left() + 3.0, band.right() - 3.0] {
+        painter.line_segment(
+            [
+                pos2(edge, band.top() + 2.0),
+                pos2(edge, band.bottom() - 2.0),
+            ],
+            Stroke::new(1.0, BG),
+        );
+    }
+}
+
 fn ruler(ui: &mut Ui, studio: &mut Studio, rect: Rect) {
     let resp = ui.interact(rect, ui.scope_id().with("ruler"), Sense::click_and_drag());
     if (resp.clicked() || resp.dragged())
@@ -305,13 +363,16 @@ fn ruler(ui: &mut Ui, studio: &mut Studio, rect: Rect) {
         );
         if bar {
             painter.text(
-                pos2(x + 5.0, rect.top() + 9.0),
+                pos2(x + 5.0, rect.top() + 15.0),
                 Align2::LEFT_CENTER,
                 b / 4 + 1,
                 font(11.0),
                 TEXT_DIM,
             );
         }
+    }
+    if studio.loop_on {
+        loop_band(ui, studio, rect);
     }
 }
 

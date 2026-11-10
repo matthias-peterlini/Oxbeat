@@ -53,9 +53,15 @@ pub enum EngineCommand {
     },
     Play,
     Stop,
+    /// Start recording on a track, after one bar of clicks if `count_in`.
     Record {
         track: u64,
+        count_in: bool,
     },
+    /// Click on every beat while playing.
+    SetMetronome(bool),
+    /// Play this range of beats round and round (`None`: play straight through).
+    SetLoop(Option<(f64, f64)>),
     /// Move the playhead to a beat.
     Locate(f64),
 }

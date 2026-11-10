@@ -173,7 +173,10 @@ fn record_captures_note_in_beats() {
     let (p, ids) = project(1);
     let t = ids[0];
     r.send(EngineCommand::SetProject(Arc::new(p)));
-    r.send(EngineCommand::Record { track: t });
+    r.send(EngineCommand::Record {
+        track: t,
+        count_in: false,
+    });
     r.render(24_000);
     r.send(EngineCommand::NoteOn {
         track: t,
@@ -207,7 +210,10 @@ fn held_note_closed_on_stop() {
     let (p, ids) = project(1);
     let t = ids[0];
     r.send(EngineCommand::SetProject(Arc::new(p)));
-    r.send(EngineCommand::Record { track: t });
+    r.send(EngineCommand::Record {
+        track: t,
+        count_in: false,
+    });
     r.send(EngineCommand::NoteOn {
         track: t,
         pitch: 60,
@@ -227,7 +233,10 @@ fn recording_longer_than_a_bar_rounds_up() {
     let mut r = rig(48_000);
     let (p, ids) = project(1);
     r.send(EngineCommand::SetProject(Arc::new(p)));
-    r.send(EngineCommand::Record { track: ids[0] });
+    r.send(EngineCommand::Record {
+        track: ids[0],
+        count_in: false,
+    });
     r.render(24_000 * 5); // 5 beats
     r.send(EngineCommand::Stop);
     r.render(512);
@@ -324,7 +333,10 @@ fn same_block_tap_records_positive_length() {
     let (p, ids) = project(1);
     let t = ids[0];
     r.send(EngineCommand::SetProject(Arc::new(p)));
-    r.send(EngineCommand::Record { track: t });
+    r.send(EngineCommand::Record {
+        track: t,
+        count_in: false,
+    });
     r.send(EngineCommand::NoteOn {
         track: t,
         pitch: 60,
@@ -348,7 +360,10 @@ fn locate_ignored_while_recording() {
     let (p, ids) = project(1);
     let t = ids[0];
     r.send(EngineCommand::SetProject(Arc::new(p)));
-    r.send(EngineCommand::Record { track: t });
+    r.send(EngineCommand::Record {
+        track: t,
+        count_in: false,
+    });
     r.render(48_000);
     r.send(EngineCommand::NoteOn {
         track: t,
@@ -497,7 +512,10 @@ fn voice_take_records_microphone_from_the_playhead() {
     r.send(EngineCommand::Locate(2.5));
     r.render(64);
     r.send(EngineCommand::SetInput(Some(mic(4096, 0.25))));
-    r.send(EngineCommand::Record { track });
+    r.send(EngineCommand::Record {
+        track,
+        count_in: false,
+    });
     r.render(1024);
     r.send(EngineCommand::Stop);
     r.render(64);
@@ -715,4 +733,155 @@ fn meters_report_track_and_master_levels() {
     assert!(right > 0.01);
     // Reading a meter resets it.
     assert_eq!(r.meters.take_master(), [0.0, 0.0]);
+}
+
+// ---- Metronome, count-in and loop ----
+
+#[test]
+fn metronome_clicks_on_the_beat_only_when_switched_on() {
+    let mut r = rig(48_000);
+    r.send(EngineCommand::SetProject(Arc::new(Project::default())));
+    r.send(EngineCommand::Play);
+    assert_eq!(peak(&r.render(48_000)), 0.0);
+
+    r.send(EngineCommand::Locate(0.0));
+    r.send(EngineCommand::SetMetronome(true));
+    let out = r.render(48_000);
+    // 120 BPM: a click every 24 000 samples, starting on the first.
+    assert!(out[1].abs() > 0.0);
+    assert!(peak(&out[..2400]) > 0.2);
+    assert_eq!(peak(&out[12_000..24_000]), 0.0);
+    assert!(peak(&out[24_000..26_400]) > 0.2);
+    // The first beat of the bar is the loud one.
+    assert!(peak(&out[..2400]) > peak(&out[24_000..26_400]));
+}
+
+#[test]
+fn metronome_is_silent_while_stopped() {
+    let mut r = rig(48_000);
+    r.send(EngineCommand::SetProject(Arc::new(Project::default())));
+    r.send(EngineCommand::SetMetronome(true));
+    assert_eq!(peak(&r.render(48_000)), 0.0);
+}
+
+#[test]
+fn count_in_clicks_for_a_bar_before_the_take_starts() {
+    let mut r = rig(48_000);
+    let (p, ids) = project(1);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::Record {
+        track: ids[0],
+        count_in: true,
+    });
+    // One bar at 120 BPM is 96 000 samples: four clicks, playhead parked.
+    let out = r.render_blocks(96_000, 333);
+    for beat in 0..4 {
+        let at = beat * 24_000;
+        assert!(peak(&out[at..at + 2400]) > 0.2, "no click on beat {beat}");
+        assert_eq!(peak(&out[at + 12_000..at + 24_000]), 0.0);
+    }
+    assert!(
+        !r.events()
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Position(b) if *b > 0.0)),
+        "the song moved during the count-in"
+    );
+    // Now it records: a note played here lands at the start of the take.
+    r.send(EngineCommand::NoteOn {
+        track: ids[0],
+        pitch: 60,
+        velocity: 100,
+    });
+    r.render(12_000);
+    r.send(EngineCommand::NoteOff {
+        track: ids[0],
+        pitch: 60,
+    });
+    r.send(EngineCommand::Stop);
+    r.render(64);
+    let events = r.events();
+    let note = events.iter().find_map(|e| match e {
+        EngineEvent::RecordedNote { note, .. } => Some(*note),
+        _ => None,
+    });
+    assert_eq!(note.unwrap().start_beat, 0.0);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::RecordFinished { .. }))
+    );
+}
+
+#[test]
+fn stopping_during_the_count_in_ends_the_take() {
+    let mut r = rig(48_000);
+    let (p, ids) = project(1);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::Record {
+        track: ids[0],
+        count_in: true,
+    });
+    r.render(30_000);
+    r.send(EngineCommand::Stop);
+    r.render(64);
+    let finished = r.events().iter().any(
+        |e| matches!(e, EngineEvent::RecordFinished { length_beats, .. } if *length_beats == 0.0),
+    );
+    assert!(finished);
+    // ...and nothing starts recording later.
+    r.render(96_000);
+    assert!(
+        !r.events()
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Position(b) if *b > 0.0))
+    );
+}
+
+#[test]
+fn loop_plays_the_range_round_and_round() {
+    let mut r = rig(48_000);
+    let (mut p, ids) = project(1);
+    with_note_at_beat_1(&mut p, ids[0]);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::SetLoop(Some((0.0, 4.0))));
+    r.send(EngineCommand::Play);
+    // Two passes of a four-beat loop: the note at beat 1 sounds twice, at the
+    // same place in each pass.
+    let out = r.render_blocks(192_000, 441);
+    assert_eq!(first_nonzero(&out), Some(24_000));
+    assert_eq!(peak(&out[90_000..96_000 + 23_999]), 0.0);
+    assert!(out[96_000 + 24_000].abs() > 0.0 || out[96_000 + 24_001].abs() > 0.0);
+    let last = r
+        .events()
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            EngineEvent::Position(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap();
+    assert!(last < 4.0, "playhead ran past the loop: {last}");
+}
+
+#[test]
+fn loop_is_ignored_while_recording() {
+    let mut r = rig(48_000);
+    let (p, ids) = project(1);
+    r.send(EngineCommand::SetProject(Arc::new(p)));
+    r.send(EngineCommand::SetLoop(Some((0.0, 1.0))));
+    r.send(EngineCommand::Record {
+        track: ids[0],
+        count_in: false,
+    });
+    r.render(96_000);
+    let last = r
+        .events()
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            EngineEvent::Position(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap();
+    assert!(last > 3.0, "{last}");
 }

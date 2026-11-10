@@ -15,6 +15,7 @@ pub enum Action {
     New,
     Open,
     Save,
+    Export,
 }
 
 #[derive(Clone, Copy)]
@@ -210,6 +211,10 @@ pub fn show(
                 if item(ui, icons::SAVE, "Save", "Ctrl+S") {
                     action = Action::Save;
                 }
+                ui.separator();
+                if item(ui, icons::DOWNLOAD, "Export Song…", "Ctrl+E") {
+                    action = Action::Export;
+                }
             });
             ui.add_space(4.0);
             ui.label(egui::RichText::new(&studio.project.name).font(bold(14.0)));
@@ -235,7 +240,7 @@ pub fn show(
     });
 
     // Center: transport + display
-    let center = Rect::from_center_size(full.center(), vec2(560.0, HEIGHT));
+    let center = Rect::from_center_size(full.center(), vec2(680.0, HEIGHT));
     ui.scope_builder(egui::UiBuilder::new().max_rect(center), |ui| {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -262,7 +267,29 @@ pub fn show(
             {
                 studio.record();
             }
-            ui.add_space(10.0);
+            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let mut metronome = studio.metronome;
+            if theme::icon_button(ui, icons::METRONOME, 30.0, metronome)
+                .on_hover_text("Metronome: click on every beat")
+                .clicked()
+            {
+                metronome = !metronome;
+                studio.set_metronome(metronome);
+            }
+            if theme::icon_button(ui, icons::COUNT_IN, 30.0, studio.count_in)
+                .on_hover_text("Count-in: one bar of clicks before recording starts")
+                .clicked()
+            {
+                studio.count_in = !studio.count_in;
+            }
+            if theme::icon_button(ui, icons::REPEAT, 30.0, studio.loop_on)
+                .on_hover_text("Loop: repeat the range marked on the ruler")
+                .clicked()
+            {
+                studio.set_loop(!studio.loop_on);
+            }
+            ui.add_space(8.0);
             display(ui, studio);
         });
     });

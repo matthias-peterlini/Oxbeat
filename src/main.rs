@@ -2,6 +2,7 @@
 
 mod audio;
 mod engine;
+mod export;
 mod midi;
 mod project;
 mod sounds;

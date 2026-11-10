@@ -14,6 +14,7 @@ mod tracks;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, Key};
@@ -59,6 +60,10 @@ pub struct OxbeatApp {
     octave: i8,
     bundle: Option<PathBuf>,
     error: Option<String>,
+    /// An export in progress, and how far along it is.
+    export: Option<(mpsc::Receiver<crate::export::Update>, f32)>,
+    /// Good news to show (e.g. where the exported song went).
+    notice: Option<String>,
     add_track: sound_browser::Browser,
     /// Computer keys currently down -> pitch they started.
     computer_keys: Vec<(Key, u8)>,
@@ -102,6 +107,8 @@ impl OxbeatApp {
             octave: 4,
             bundle: None,
             error: None,
+            export: None,
+            notice: None,
             add_track: sound_browser::Browser::new(crate::sounds::packs::PackManager::new({
                 let ctx = cc.egui_ctx.clone();
                 Arc::new(move || ctx.request_repaint())
@@ -269,10 +276,83 @@ impl OxbeatApp {
         }
     }
 
+    /// Ask where to save the song as audio, then render it in the background.
+    fn export_song(&mut self, ctx: &egui::Context) {
+        if self.export.is_some() {
+            return;
+        }
+        let Some(mut path) = rfd::FileDialog::new()
+            .set_title("Export song")
+            .set_file_name(format!("{}.mp3", self.studio.project.name))
+            .add_filter("MP3 (small, for sharing)", &["mp3"])
+            .add_filter("WAV (full quality)", &["wav"])
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("mp3");
+        }
+        let ctx = ctx.clone();
+        let updates = crate::export::start(
+            self.studio.project.clone(),
+            self.studio.audio_dir.clone(),
+            path,
+            move || ctx.request_repaint(),
+        );
+        self.export = Some((updates, 0.0));
+    }
+
+    /// Follow a running export and show its progress.
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        let Some((updates, progress)) = &mut self.export else {
+            return;
+        };
+        let mut done = None;
+        loop {
+            match updates.try_recv() {
+                Ok(crate::export::Update::Progress(p)) => *progress = p,
+                Ok(crate::export::Update::Done(result)) => done = Some(result),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    done.get_or_insert(Err("The export stopped unexpectedly.".into()));
+                    break;
+                }
+            }
+        }
+        let progress = *progress;
+        if let Some(result) = done {
+            self.export = None;
+            match result {
+                Ok(path) => {
+                    self.notice = Some(format!("Your song was saved as\n{}", path.display()))
+                }
+                Err(e) => self.error = Some(format!("Could not export the song. {e}")),
+            }
+            return;
+        }
+        egui::Modal::new(egui::Id::unique("export"))
+            .frame(
+                egui::Frame::window(&ctx.global_style())
+                    .inner_margin(24)
+                    .corner_radius(12),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(340.0);
+                ui.label(egui::RichText::new("Exporting your song…").font(theme::bold(17.0)));
+                ui.add_space(12.0);
+                ui.add(egui::ProgressBar::new(progress).desired_height(8.0));
+                ui.add_space(4.0);
+            });
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let command = |i: &egui::InputState, k: Key| i.modifiers.command && i.key_pressed(k);
         let (save, open, new) =
             ctx.input(|i| (command(i, Key::S), command(i, Key::O), command(i, Key::N)));
+        if ctx.input(|i| command(i, Key::E)) {
+            self.export_song(ctx);
+        }
         if save {
             self.save_project();
         }
@@ -326,7 +406,12 @@ impl OxbeatApp {
             self.studio.shared.note_off(p);
         }
 
-        if ctx.egui_wants_keyboard_input() || self.add_track.open || self.error.is_some() {
+        if ctx.egui_wants_keyboard_input()
+            || self.add_track.open
+            || self.error.is_some()
+            || self.notice.is_some()
+            || self.export.is_some()
+        {
             return;
         }
         for e in events {
@@ -382,8 +467,10 @@ impl OxbeatApp {
     }
 
     fn error_dialog(&mut self, ctx: &egui::Context) {
-        let Some(msg) = self.error.clone() else {
-            return;
+        let (title, msg) = match (&self.error, &self.notice) {
+            (Some(e), _) => ("Something went wrong", e.clone()),
+            (None, Some(n)) => ("All done", n.clone()),
+            (None, None) => return,
         };
         let r = egui::Modal::new(egui::Id::unique("error"))
             .frame(
@@ -393,7 +480,7 @@ impl OxbeatApp {
             )
             .show(ctx, |ui| {
                 ui.set_width(380.0);
-                ui.label(egui::RichText::new("Something went wrong").font(theme::bold(17.0)));
+                ui.label(egui::RichText::new(title).font(theme::bold(17.0)));
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(msg).color(theme::TEXT_DIM));
                 ui.add_space(18.0);
@@ -403,7 +490,10 @@ impl OxbeatApp {
                 .inner
             });
         if r.inner || r.should_close() {
-            self.error = None;
+            // The error shows first; closing it reveals any notice behind it.
+            if self.error.take().is_none() {
+                self.notice = None;
+            }
         }
     }
 }
@@ -475,6 +565,7 @@ impl eframe::App for OxbeatApp {
             top_bar::Action::New => self.new_project(),
             top_bar::Action::Open => self.open_project(),
             top_bar::Action::Save => self.save_project(),
+            top_bar::Action::Export => self.export_song(&ctx),
             top_bar::Action::None => {}
         }
 
@@ -540,6 +631,7 @@ impl eframe::App for OxbeatApp {
 ",
             ));
         }
+        self.export_dialog(&ctx);
         self.error_dialog(&ctx);
     }
 }

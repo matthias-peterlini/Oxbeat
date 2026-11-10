@@ -2790,6 +2790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shine-rs",
  "symphonia",
  "tempfile",
  "thiserror 2.0.21",
@@ -3462,6 +3463,18 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "shine-rs"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e2645933a5b5c439139f836098c7ad9ad6e934f84e713c4b144b25793100eff"
+dependencies = [
+ "hound",
+ "lazy_static",
+ "log",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

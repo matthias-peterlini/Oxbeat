@@ -129,6 +129,13 @@ pub struct Studio {
     history: History,
     /// The clip picked in the arrangement, if any.
     pub selected_clip: Option<u64>,
+    /// Click on every beat while playing.
+    pub metronome: bool,
+    /// Count one bar in before recording.
+    pub count_in: bool,
+    pub loop_on: bool,
+    /// Beats the loop runs between.
+    pub loop_region: (f64, f64),
     pub shared: Arc<Shared>,
     pub events: rtrb::Consumer<EngineEvent>,
     meters: Arc<Meters>,
@@ -172,6 +179,10 @@ impl Studio {
         let mut s = Self {
             history: History::new(&project),
             selected_clip: None,
+            metronome: false,
+            count_in: false,
+            loop_on: false,
+            loop_region: (0.0, 16.0),
             project,
             shared: Arc::new(Shared {
                 cmd: Mutex::new(link.commands),
@@ -269,6 +280,34 @@ impl Studio {
             self.selected_clip = None;
         }
         self.history.record(&self.project, Instant::now());
+    }
+
+    pub fn set_metronome(&mut self, on: bool) {
+        self.metronome = on;
+        self.shared.send(EngineCommand::SetMetronome(on));
+    }
+
+    /// Switch looping on or off. Switching it on with a clip picked loops that clip.
+    pub fn set_loop(&mut self, on: bool) {
+        if on && let Some((_, clip)) = self.selected_clip.and_then(|c| self.project.clip(c)) {
+            let from = clip.start_beat.floor();
+            self.loop_region = (from, clip.end_beat().ceil().max(from + 1.0));
+        }
+        self.loop_on = on;
+        self.send_loop();
+    }
+
+    /// Move the loop; it always covers at least one beat.
+    pub fn set_loop_region(&mut self, from: f64, to: f64) {
+        let from = from.max(0.0);
+        self.loop_region = (from, to.max(from + 1.0));
+        self.send_loop();
+    }
+
+    fn send_loop(&self) {
+        self.shared.send(EngineCommand::SetLoop(
+            self.loop_on.then_some(self.loop_region),
+        ));
     }
 
     pub fn can_undo(&self) -> bool {
@@ -542,6 +581,9 @@ impl Studio {
         self.loaded_audio.clear();
         self.input_name = None;
         self.sync();
+        self.shared
+            .send(EngineCommand::SetMetronome(self.metronome));
+        self.send_loop();
     }
 
     pub fn drain_events(&mut self) {
@@ -718,7 +760,10 @@ impl Studio {
         } else {
             self.recording_from = Some((track, (self.position / 4.0).floor() * 4.0));
         }
-        self.shared.send(EngineCommand::Record { track });
+        self.shared.send(EngineCommand::Record {
+            track,
+            count_in: self.count_in,
+        });
         self.recording = true;
         self.playing = true;
     }
