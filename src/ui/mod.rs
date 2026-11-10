@@ -33,7 +33,7 @@ const KEY_VELOCITY: u8 = 100;
 const INPUT_RETRY: Duration = Duration::from_secs(2);
 
 pub use theme::apply as apply_theme;
-use theme::{BG, BORDER, RECORD, SURFACE};
+use theme::{BG, BORDER, RECORD, SURFACE, TEXT_DIM};
 
 /// What the panel along the bottom shows.
 #[derive(Clone, Copy, PartialEq)]
@@ -64,6 +64,8 @@ pub struct OxbeatApp {
     export: Option<(mpsc::Receiver<crate::export::Update>, f32)>,
     /// Good news to show (e.g. where the exported song went).
     notice: Option<String>,
+    /// The instrument-library strip was closed (until the next launch).
+    essentials_dismissed: bool,
     add_track: sound_browser::Browser,
     /// Computer keys currently down -> pitch they started.
     computer_keys: Vec<(Key, u8)>,
@@ -109,6 +111,7 @@ impl OxbeatApp {
             error: None,
             export: None,
             notice: None,
+            essentials_dismissed: false,
             add_track: sound_browser::Browser::new(crate::sounds::packs::PackManager::new({
                 let ctx = cc.egui_ctx.clone();
                 Arc::new(move || ctx.request_repaint())
@@ -496,6 +499,52 @@ impl OxbeatApp {
             }
         }
     }
+
+    /// A slim, dismissible strip while the instrument library downloads or fails.
+    fn essentials_strip(&mut self, ui: &mut egui::Ui) {
+        use crate::sounds::packs::EssentialsStatus;
+        if self.essentials_dismissed {
+            return;
+        }
+        let text = match self.add_track.packs.essentials_status() {
+            EssentialsStatus::Hidden => return,
+            EssentialsStatus::Downloading { permille, size } => {
+                let mut t = format!("Downloading the instrument library… {}%", permille / 10);
+                if size > 0 {
+                    let mb = |b: f64| b / 1_048_576.0;
+                    t += &format!(
+                        " ({:.0} of {:.0} MB)",
+                        mb(size as f64 * permille as f64 / 1000.0),
+                        mb(size as f64)
+                    );
+                }
+                t
+            }
+            EssentialsStatus::Failed(e) => format!(
+                "Couldn't download the instrument library: {e} Oxbeat will try again next time."
+            ),
+        };
+        egui::Panel::top("essentials-strip")
+            .frame(
+                egui::Frame::NONE
+                    .fill(SURFACE)
+                    .inner_margin(egui::Margin::symmetric(16, 6))
+                    .stroke(egui::Stroke::new(1.0, BORDER)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(text).color(TEXT_DIM));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::icon_button(ui, icons::X, 22.0, false)
+                            .on_hover_text("Hide")
+                            .clicked()
+                        {
+                            self.essentials_dismissed = true;
+                        }
+                    });
+                });
+            });
+    }
 }
 
 impl eframe::App for OxbeatApp {
@@ -523,7 +572,6 @@ impl eframe::App for OxbeatApp {
         };
         ctx.request_repaint_after(next);
     }
-
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_keys(&ctx);
@@ -548,6 +596,9 @@ impl eframe::App for OxbeatApp {
                     }
                 });
         }
+
+        self.add_track.packs.ensure_essentials();
+        self.essentials_strip(ui);
 
         let mut action = top_bar::Action::None;
         egui::Panel::top("top-bar")

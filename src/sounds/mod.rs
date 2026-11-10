@@ -6,6 +6,7 @@
 //! - `pack:<pack-id>/<file in pack>[#bank:program]` a sound from a downloaded pack
 
 pub mod decode;
+pub mod essentials;
 pub mod library;
 pub mod packs;
 pub mod sfz;

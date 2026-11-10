@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use super::essentials;
 use super::library::{self, PackManifest, is_safe_id, packs_dir};
 
 pub const INDEX_URL: &str =
@@ -194,6 +195,14 @@ pub enum IndexState {
     Failed(String),
 }
 
+/// What the "instrument library" strip should show.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EssentialsStatus {
+    Hidden,
+    Downloading { permille: u32, size: u64 },
+    Failed(String),
+}
+
 enum Msg {
     Index(Result<Vec<IndexEntry>, String>),
     Installed(String, Result<(), String>),
@@ -206,6 +215,12 @@ pub struct PackManager {
     /// Pack id -> progress in permille.
     pub downloads: HashMap<String, Arc<AtomicU32>>,
     pub errors: Vec<String>,
+    /// Ids of packs installed since the app started. Callers drain it.
+    pub just_installed: Vec<String>,
+    essentials: essentials::State,
+    /// The auto-install was started this session; don't start it again.
+    essentials_tried: bool,
+    essentials_error: Option<String>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     repaint: Arc<dyn Fn() + Send + Sync>,
@@ -219,6 +234,10 @@ impl PackManager {
             installed: library::installed_packs(),
             downloads: HashMap::new(),
             errors: Vec::new(),
+            just_installed: Vec::new(),
+            essentials: essentials::load(&packs_dir()),
+            essentials_tried: false,
+            essentials_error: None,
             tx,
             rx,
             repaint,
@@ -256,6 +275,10 @@ impl PackManager {
         if self.downloads.contains_key(&entry.id) {
             return;
         }
+        if entry.id == essentials::ID {
+            self.set_removed_by_user(false);
+            self.essentials_error = None;
+        }
         let progress = Arc::new(AtomicU32::new(0));
         self.downloads.insert(entry.id.clone(), progress.clone());
         let tx = self.tx.clone();
@@ -274,8 +297,85 @@ impl PackManager {
     pub fn uninstall(&mut self, id: &str) {
         if let Err(e) = remove(id) {
             self.errors.push(format!("Could not remove the pack: {e}"));
+        } else if id == essentials::ID {
+            self.set_removed_by_user(true);
         }
         self.refresh_installed();
+    }
+
+    fn set_removed_by_user(&mut self, removed: bool) {
+        if self.essentials.removed_by_user != removed {
+            self.essentials.removed_by_user = removed;
+            essentials::save(&packs_dir(), &self.essentials);
+        }
+    }
+
+    fn essentials_wanted(&self) -> bool {
+        essentials::should_auto_install(
+            self.is_installed(essentials::ID).is_some(),
+            self.downloads.contains_key(essentials::ID),
+            &self.essentials,
+        )
+    }
+
+    /// Call every frame. Downloads the essentials pack once per launch when it is
+    /// missing and the user hasn't removed it.
+    pub fn ensure_essentials(&mut self) {
+        if self.essentials_tried || !self.essentials_wanted() {
+            return;
+        }
+        match &self.index {
+            IndexState::NotLoaded => self.load_index(),
+            IndexState::Loading | IndexState::Failed(_) => {}
+            IndexState::Ready(list) => {
+                // Not published yet: stay quiet.
+                if let Some(entry) = list.iter().find(|e| e.id == essentials::ID).cloned() {
+                    self.essentials_tried = true;
+                    self.install(entry);
+                }
+            }
+        }
+    }
+
+    /// The user asked for the instruments ("Install instruments"): allow and start
+    /// the download even after a removal or a failure.
+    pub fn request_essentials(&mut self) {
+        self.set_removed_by_user(false);
+        self.essentials_tried = false;
+        self.essentials_error = None;
+        if matches!(self.index, IndexState::Failed(_)) {
+            self.retry_index();
+        }
+    }
+
+    /// True while Essentials is not installed, so the Library tab can offer it.
+    pub fn essentials_missing(&self) -> bool {
+        self.is_installed(essentials::ID).is_none()
+    }
+
+    pub fn essentials_status(&self) -> EssentialsStatus {
+        if let Some(p) = self.downloads.get(essentials::ID) {
+            let size = match &self.index {
+                IndexState::Ready(list) => list
+                    .iter()
+                    .find(|e| e.id == essentials::ID)
+                    .map_or(0, |e| e.size),
+                _ => 0,
+            };
+            return EssentialsStatus::Downloading {
+                permille: p.load(Ordering::Relaxed),
+                size,
+            };
+        }
+        if let Some(e) = &self.essentials_error {
+            return EssentialsStatus::Failed(e.clone());
+        }
+        if self.essentials_wanted()
+            && let IndexState::Failed(e) = &self.index
+        {
+            return EssentialsStatus::Failed(e.clone());
+        }
+        EssentialsStatus::Hidden
     }
 
     /// Apply finished background work. Returns true if the installed list changed.
@@ -287,8 +387,11 @@ impl PackManager {
                 Msg::Index(Err(e)) => self.index = IndexState::Failed(e),
                 Msg::Installed(id, r) => {
                     self.downloads.remove(&id);
-                    if let Err(e) = r {
-                        self.errors.push(format!("Could not install the pack: {e}"));
+                    match r {
+                        Ok(()) => self.just_installed.push(id),
+                        // The strip reports this one; no modal for a background download.
+                        Err(e) if id == essentials::ID => self.essentials_error = Some(e),
+                        Err(e) => self.errors.push(format!("Could not install the pack: {e}")),
                     }
                     changed = true;
                 }

@@ -10,6 +10,7 @@ use super::icons;
 use super::studio::Studio;
 use super::theme::{self, ACCENT, SURFACE_2, SURFACE_3, TEXT, TEXT_DIM, TEXT_FAINT, bold, font};
 use crate::project::TrackKind;
+use crate::sounds::essentials;
 use crate::sounds::library::{self, SoundKind};
 use crate::sounds::packs::{IndexState, PackManager};
 use crate::sounds::{self, BUILTIN_INSTRUMENTS, BUILTIN_KITS, IMPORT_EXTENSIONS, Preset};
@@ -438,6 +439,16 @@ fn sounds_page(ui: &mut Ui, studio: &mut Studio, b: &mut Browser, current: Optio
                     "Import a file…  (SF2, SFZ, WAV, FLAC, OGG, MP3)",
                 ) {
                     import = true;
+                }
+                if b.packs.essentials_missing()
+                    && !b.packs.downloads.contains_key(essentials::ID)
+                    && link_button(
+                        ui,
+                        icons::DOWNLOAD,
+                        "Install instruments  (the free Oxbeat sound library)",
+                    )
+                {
+                    b.packs.request_essentials();
                 }
                 let kind = b.kind();
                 let imports: Vec<_> = library::imports()
