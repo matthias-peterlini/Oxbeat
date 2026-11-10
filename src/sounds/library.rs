@@ -87,9 +87,9 @@ pub const CATEGORIES: [&str; 10] = [
     "World",
 ];
 
-/// The sound's category, else the pack's if it is a known one, else "Other".
+/// The sound's category if known, else the pack's if known, else "Other".
 pub fn category_of<'a>(pack: &'a PackManifest, sound: &'a PackSound) -> &'a str {
-    if !sound.category.is_empty() {
+    if CATEGORIES.contains(&sound.category.as_str()) {
         &sound.category
     } else if CATEGORIES.contains(&pack.category.as_str()) {
         &pack.category
@@ -242,6 +242,12 @@ mod tests {
         assert_eq!(category_of(&m, &m.sounds[0]), "Strings");
         let m = manifest("Strings", "Keyboards");
         assert_eq!(category_of(&m, &m.sounds[0]), "Keyboards");
+        // Unknown sound categories fall back instead of hiding the sound.
+        let m = manifest("Strings", "Woodwinds");
+        assert_eq!(category_of(&m, &m.sounds[0]), "Strings");
+        let m = manifest("Woodwinds", "keyboards");
+        assert_eq!(category_of(&m, &m.sounds[0]), "Other");
+        let m = manifest("Strings", "Keyboards");
         assert_eq!(m.homepage, "https://example.com");
         // Old manifests without the new fields still parse.
         let old: PackManifest =
