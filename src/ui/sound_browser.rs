@@ -11,7 +11,7 @@ use super::studio::Studio;
 use super::theme::{self, ACCENT, SURFACE_2, SURFACE_3, TEXT, TEXT_DIM, TEXT_FAINT, bold, font};
 use crate::project::TrackKind;
 use crate::sounds::essentials;
-use crate::sounds::library::{self, SoundKind};
+use crate::sounds::library::{self, PackManifest, SoundKind};
 use crate::sounds::packs::{IndexState, PackManager};
 use crate::sounds::{self, BUILTIN_INSTRUMENTS, BUILTIN_KITS, IMPORT_EXTENSIONS, Preset};
 
@@ -50,6 +50,7 @@ enum Target {
 
 pub struct Browser {
     pub open: bool,
+    credits_open: bool,
     page: Page,
     target: Target,
     drums: bool,
@@ -63,6 +64,7 @@ impl Browser {
     pub fn new(packs: PackManager) -> Browser {
         Browser {
             open: false,
+            credits_open: false,
             page: Page::TrackType,
             target: Target::NewTrack,
             drums: false,
@@ -310,11 +312,42 @@ fn link_button(ui: &mut Ui, icon: &str, label: &str) -> bool {
         .clicked()
 }
 
+/// One line per credit; a pack's homepage follows its line.
+fn credit_lines(packs: &[PackManifest]) -> Vec<String> {
+    let mut lines = vec!["Built-in synths and kits — Oxbeat — GPL-3.0-or-later".to_string()];
+    for p in packs {
+        lines.push(format!("{} — {} — {}", p.name, p.author, p.license));
+        if !p.homepage.is_empty() {
+            lines.push(p.homepage.clone());
+        }
+    }
+    lines
+}
+
+fn credits_window(ctx: &egui::Context, b: &mut Browser) {
+    let lines = credit_lines(&b.packs.installed);
+    egui::Window::new("Sound credits")
+        .open(&mut b.credits_open)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            for line in &lines {
+                if line.starts_with("http") {
+                    ui.hyperlink(line);
+                } else {
+                    ui.label(line);
+                }
+            }
+        });
+}
+
 pub fn show(ctx: &egui::Context, studio: &mut Studio, b: &mut Browser) {
     if b.packs.poll() {
         studio.reload_missing();
     }
     b.errors.append(&mut b.packs.errors);
+    if b.credits_open {
+        credits_window(ctx, b);
+    }
     if !b.open {
         return;
     }
@@ -522,6 +555,10 @@ fn sounds_page(ui: &mut Ui, studio: &mut Studio, b: &mut Browser, current: Optio
                         );
                     });
                 }
+                ui.add_space(8.0);
+                if link_button(ui, icons::HEADPHONES, "Sound credits") {
+                    b.credits_open = true;
+                }
             }
             Tab::Store => store(ui, b),
         });
@@ -697,5 +734,32 @@ fn presets_page(
             None => library::import_sound(path, &label, Some(preset), b.kind()),
         };
         b.pick(studio, &sound, &label);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sounds::library::PackManifest;
+
+    fn pack(name: &str, homepage: &str) -> PackManifest {
+        serde_json::from_str(&format!(
+            r#"{{"id":"p","name":"{name}","author":"Ann","license":"CC0","homepage":"{homepage}","sounds":[]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn credit_lines_list_every_installed_pack() {
+        let lines = credit_lines(&[pack("A", "https://a.example"), pack("B", "")]);
+        assert_eq!(
+            lines,
+            [
+                "Built-in synths and kits — Oxbeat — GPL-3.0-or-later",
+                "A — Ann — CC0",
+                "https://a.example",
+                "B — Ann — CC0",
+            ]
+        );
     }
 }
