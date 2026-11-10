@@ -404,16 +404,23 @@ fn render_voice(
             Stage::Idle => break,
         }
         if looping && v.pos >= r.loop_end as f64 {
-            v.pos -= (r.loop_end - r.loop_start) as f64;
+            let span = (r.loop_end - r.loop_start) as f64;
+            v.pos = r.loop_start as f64 + (v.pos - r.loop_start as f64) % span;
         }
         let idx = v.pos as usize;
-        if idx + 1 >= len {
+        // While looping, the frame after the loop's last one is its first, so
+        // loops that run to the end of the sample keep going.
+        let next = if looping && idx + 1 >= r.loop_end {
+            r.loop_start
+        } else if idx + 1 >= len {
             *v = Voice::IDLE;
             break;
-        }
+        } else {
+            idx + 1
+        };
         let frac = (v.pos - idx as f64) as f32;
         let (l0, r0) = frame(idx);
-        let (l1, r1) = frame(idx + 1);
+        let (l1, r1) = frame(next);
         left[i] += (l0 + (l1 - l0) * frac) * v.level * v.gain_l;
         right[i] += (r0 + (r1 - r0) * frac) * v.level * v.gain_r;
         v.pos += v.step;
@@ -542,6 +549,25 @@ mod tests {
         s.note_off(60);
         render(&mut s, 4800);
         assert_eq!(s.active_voices(), 0);
+    }
+
+    #[test]
+    fn loop_to_last_sample_holds() {
+        for compact in [true, false] {
+            for pitch in [60, 64] {
+                let sample = mono_sine(48_000, 4800, compact);
+                let mut r = Region::whole(sample, 60);
+                r.loop_mode = LoopMode::Continuous;
+                r.loop_start = 1000;
+                r.loop_end = 4800;
+                let mut s = Sampler::new(Arc::new(vec![r]), 48_000);
+                s.note_on(pitch, 127);
+                render(&mut s, 2 * 48_000 - 4800);
+                let tail = render(&mut s, 4800);
+                assert_eq!(s.active_voices(), 1, "compact {compact} pitch {pitch}");
+                assert!(peak(&tail) > 0.3, "compact {compact} pitch {pitch}");
+            }
+        }
     }
 
     #[test]

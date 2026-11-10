@@ -409,6 +409,72 @@ mod tests {
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
+    /// Every .sfz under `$OXBEAT_REAL_SOUNDS` with looping regions must keep
+    /// sounding while a note is held for 8 s, at the middle of each looping
+    /// region's key and velocity range.
+    #[test]
+    #[ignore]
+    fn every_real_looping_sfz_holds() {
+        use crate::engine::sampler::LoopMode;
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if ext(&p) == "sfz" {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            Path::new(&std::env::var("OXBEAT_REAL_SOUNDS").unwrap()),
+            &mut files,
+        );
+        files.sort();
+        let (mut failures, mut tested) = (Vec::new(), 0);
+        for f in files {
+            let text = String::from_utf8_lossy(&std::fs::read(&f).unwrap()).into_owned();
+            let parsed = sfz::parse(&text, f.parent().unwrap()).unwrap();
+            let regions = Arc::new(sfz::build_regions(&parsed, sample).unwrap());
+            let mut keys: Vec<(u8, u8)> = regions
+                .iter()
+                .filter(|r| matches!(r.loop_mode, LoopMode::Continuous | LoopMode::Sustain))
+                .map(|r| {
+                    let vel = ((r.lovel as u16 + r.hivel as u16) / 2).max(1) as u8;
+                    (((r.lokey as u16 + r.hikey as u16) / 2) as u8, vel)
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            if keys.is_empty() {
+                continue;
+            }
+            tested += 1;
+            for (key, vel) in keys {
+                let mut s = Sampler::new(Arc::clone(&regions), 48_000);
+                s.note_on(key, vel);
+                let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+                for _ in 0..79 {
+                    s.render(&mut l, &mut r);
+                }
+                l.fill(0.0);
+                r.fill(0.0);
+                s.render(&mut l, &mut r);
+                let peak = l.iter().chain(&r).fold(0.0f32, |m, x| m.max(x.abs()));
+                if peak < 0.001 {
+                    failures.push(format!(
+                        "{} key {key} vel {vel}: silent at 8 s",
+                        f.display()
+                    ));
+                }
+            }
+        }
+        println!("{tested} looping sfz files held");
+        assert!(tested > 0, "no looping sfz files found");
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     #[test]
     fn loads_wav_and_sfz_files() {
         let dir = tempfile::tempdir().unwrap();
