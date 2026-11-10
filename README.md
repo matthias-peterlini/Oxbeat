@@ -13,7 +13,7 @@ A free, friendly music studio for Windows, macOS and Linux.
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)
 
 [Download](https://github.com/matthias-peterlini/Oxbeat/releases) ·
-[Sound packs](https://github.com/matthias-peterlini/Oxbeat-Sounds) ·
+[Sound packs](https://github.com/matthias-peterlini/Oxbeat-beats) ·
 [Build from source](#build-from-source)
 
 </div>
@@ -86,7 +86,7 @@ steps; double-click a clip to edit its notes, or an empty lane to start a new on
 
 ## Sound packs
 
-Packs live in [Oxbeat-Sounds](https://github.com/matthias-peterlini/Oxbeat-Sounds) and are
+Packs live in [Oxbeat-beats](https://github.com/matthias-peterlini/Oxbeat-beats) and are
 installed from **Add Track → Store**. Every pack is free to use in your own music and ships
 with its licence. You can also point the browser at any `.sf2`, `.sfz` or audio file on your
 disk.

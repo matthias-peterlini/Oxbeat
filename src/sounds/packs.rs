@@ -1,4 +1,4 @@
-//! Downloading sound packs from the Oxbeat-Sounds repository, in the background.
+//! Downloading sound packs from the Oxbeat-beats repository, in the background.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::library::{self, PackManifest, is_safe_id, packs_dir};
 
 pub const INDEX_URL: &str =
-    "https://github.com/matthias-peterlini/Oxbeat-Sounds/releases/download/packs/index.json";
+    "https://github.com/matthias-peterlini/Oxbeat-beats/releases/download/packs/index.json";
 /// Refuse absurd downloads (and zip bombs) outright.
 const MAX_PACK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
