@@ -75,8 +75,9 @@ impl SampleData {
         }
     }
 
-    /// Heap bytes of sample data (used by the cache budget in a later task).
-    #[allow(dead_code)]
+    /// Heap bytes of sample data. Tests use it for the pack memory budget; the
+    /// sample cache will use it at runtime.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn bytes(&self) -> usize {
         match &self.frames {
             Frames::Stereo(v) => v.len() * 4,

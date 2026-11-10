@@ -276,13 +276,14 @@ mod tests {
         );
     }
 
-    /// Loads real libraries from `$OXBEAT_REAL_SOUNDS` (GeneralUser GS as gu.sf2,
-    /// SamsSonor-master/, Ixox.Flute-master/). Run with `cargo test -- --ignored`.
+    /// Loads the unpacked Oxbeat Essentials pack from `$OXBEAT_REAL_SOUNDS`, plays
+    /// its defaults, and checks that all of its SFZ samples fit in 600 MB of RAM.
+    /// Run with `cargo test --release loads_real_libraries -- --ignored`.
     #[test]
     #[ignore]
     fn loads_real_libraries() {
         let dir = PathBuf::from(std::env::var("OXBEAT_REAL_SOUNDS").unwrap());
-        let gu = dir.join("gu.sf2");
+        let gu = dir.join("GeneralUser-GS.sf2");
         let presets = soundfont_presets(&gu).unwrap();
         for (bank, program) in [
             (0, 0),
@@ -320,14 +321,8 @@ mod tests {
                 ),
                 38,
             ),
-            (
-                file_sound(&dir.join("SamsSonor-master/SamsSonor.sfz"), None),
-                38,
-            ),
-            (
-                file_sound(&dir.join("Ixox.Flute-master/Ixox Flute.sfz"), None),
-                72,
-            ),
+            (file_sound(&dir.join("Grand Piano.sfz"), None), 60),
+            (file_sound(&dir.join("Drums.sfz"), None), 38),
         ];
         for (id, note) in ids {
             let t = std::time::Instant::now();
@@ -340,6 +335,37 @@ mod tests {
             println!("  peak {peak}");
             assert!(peak > 0.01, "{id} silent");
         }
+
+        // Every SFZ in the pack, decoded, must fit the memory budget. Samples are
+        // shared through the cache, so each one is counted once.
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| ext(p) == "sfz")
+            .collect();
+        files.sort();
+        assert!(files.len() >= 2, "no .sfz files in {}", dir.display());
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0usize;
+        let mut keep = Vec::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let parsed = sfz::parse(&text, &dir).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            let regions = sfz::build_regions(&parsed, sample)
+                .unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            let mut own = 0usize;
+            for r in &regions {
+                if seen.insert(Arc::as_ptr(&r.sample) as usize) {
+                    own += r.sample.bytes();
+                }
+            }
+            total += own;
+            println!("{:7.1} MB  {}", own as f64 / 1048576.0, f.display());
+            keep.push(regions); // hold the samples so the cache can't drop them
+        }
+        println!("{:7.1} MB  total", total as f64 / 1048576.0);
+        assert!(total < 600 * 1048576, "{total} bytes of samples");
     }
 
     /// Every .sfz under `$OXBEAT_REAL_SOUNDS` must load and make sound at some key.
