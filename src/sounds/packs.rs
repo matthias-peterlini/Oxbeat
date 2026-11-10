@@ -181,6 +181,27 @@ fn pack_root(dir: &Path) -> Option<PathBuf> {
     only.path().join("pack.json").is_file().then(|| only.path())
 }
 
+/// Delete what an interrupted download left in `dir` (`.download-*.zip` files and
+/// `.unpack-*` folders). Call before any download starts.
+pub fn sweep_temp(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let p = e.path();
+        if name.starts_with(".download-") && name.ends_with(".zip") {
+            let _ = std::fs::remove_file(&p);
+        } else if name.starts_with(".unpack-") {
+            let _ = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
+        }
+    }
+}
+
 pub fn remove(id: &str) -> Result<(), String> {
     if !is_safe_id(id) {
         return Err("bad pack id".into());
@@ -229,6 +250,8 @@ pub struct PackManager {
 impl PackManager {
     pub fn new(repaint: Arc<dyn Fn() + Send + Sync>) -> PackManager {
         let (tx, rx) = channel();
+        // Nothing is downloading yet, so anything temporary is from a quit mid-download.
+        sweep_temp(&packs_dir());
         PackManager {
             index: IndexState::NotLoaded,
             installed: library::installed_packs(),
@@ -456,6 +479,24 @@ mod tests {
         make_zip(&z, &[("pack.json", MANIFEST)]);
         assert!(extract_pack(&z, dir.path(), "other").is_err());
         assert!(!dir.path().join("other").exists());
+    }
+
+    #[test]
+    fn sweeps_leftover_download_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join(".download-essentials.zip"), "partial").unwrap();
+        std::fs::create_dir_all(d.join(".unpack-essentials/samples")).unwrap();
+        std::fs::write(d.join(".unpack-essentials/samples/a.flac"), "x").unwrap();
+        std::fs::create_dir_all(d.join("demo")).unwrap();
+        std::fs::write(d.join("demo/pack.json"), MANIFEST).unwrap();
+        std::fs::write(d.join("essentials.json"), "{}").unwrap();
+        sweep_temp(d);
+        assert!(!d.join(".download-essentials.zip").exists());
+        assert!(!d.join(".unpack-essentials").exists());
+        assert!(d.join("demo/pack.json").is_file());
+        assert!(d.join("essentials.json").is_file());
+        sweep_temp(&d.join("missing")); // no packs dir yet: nothing to do
     }
 
     #[test]
