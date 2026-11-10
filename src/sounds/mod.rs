@@ -113,7 +113,7 @@ fn sample(path: &Path) -> Result<Arc<SampleData>, String> {
     if let Some(s) = with_cache(|c| c.samples.get(path).and_then(Weak::upgrade)) {
         return Ok(s);
     }
-    let s = Arc::new(decode::decode_file(path)?);
+    let s = Arc::new(decode::decode_compact(path)?);
     with_cache(|c| c.samples.insert(path.to_path_buf(), Arc::downgrade(&s)));
     Ok(s)
 }

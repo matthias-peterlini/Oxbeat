@@ -9,20 +9,78 @@ const MIN_RELEASE: f32 = 0.006;
 /// Fast fade for voices cut by `off_by` groups and voice stealing.
 const CHOKE_SECONDS: f32 = 0.01;
 
-/// Decoded audio: interleaved stereo frames at `rate`.
-#[derive(Debug, Default)]
+/// Sample storage. Recordings and clips are `Stereo` f32; instrument samples
+/// are `Compact` 16-bit, with mono kept as one channel.
+#[derive(Debug)]
+pub enum Frames {
+    /// Interleaved stereo.
+    Stereo(Vec<f32>),
+    /// Interleaved; `channels` is 1 or 2.
+    Compact { channels: u8, data: Vec<i16> },
+}
+
+/// Decoded audio at `rate`.
+#[derive(Debug)]
 pub struct SampleData {
     pub rate: u32,
-    pub frames: Vec<f32>,
+    pub frames: Frames,
+}
+
+impl Default for SampleData {
+    fn default() -> Self {
+        SampleData::stereo(0, Vec::new())
+    }
 }
 
 impl SampleData {
+    pub fn stereo(rate: u32, interleaved: Vec<f32>) -> SampleData {
+        SampleData {
+            rate,
+            frames: Frames::Stereo(interleaved),
+        }
+    }
+
+    /// `channels` is 1 or 2.
+    pub fn compact(rate: u32, channels: u8, data: Vec<i16>) -> SampleData {
+        debug_assert!(channels == 1 || channels == 2);
+        SampleData {
+            rate,
+            frames: Frames::Compact { channels, data },
+        }
+    }
+
     pub fn len(&self) -> usize {
-        self.frames.len() / 2
+        match &self.frames {
+            Frames::Stereo(v) => v.len() / 2,
+            Frames::Compact { channels, data } => data.len() / *channels as usize,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.frames.is_empty()
+        self.len() == 0
+    }
+
+    /// Frame `i` as (left, right); mono returns the same value twice.
+    pub fn frame(&self, i: usize) -> (f32, f32) {
+        match &self.frames {
+            Frames::Stereo(v) => (v[i * 2], v[i * 2 + 1]),
+            Frames::Compact { channels: 1, data } => {
+                let x = data[i] as f32 / 32768.0;
+                (x, x)
+            }
+            Frames::Compact { data, .. } => (
+                data[i * 2] as f32 / 32768.0,
+                data[i * 2 + 1] as f32 / 32768.0,
+            ),
+        }
+    }
+
+    /// Heap bytes of sample data.
+    pub fn bytes(&self) -> usize {
+        match &self.frames {
+            Frames::Stereo(v) => v.len() * 4,
+            Frames::Compact { data, .. } => data.len() * 2,
+        }
     }
 }
 
@@ -276,63 +334,87 @@ impl Sampler {
                 continue;
             }
             let r = &regions[v.region];
-            let data = &r.sample.frames;
-            let len = r.end.min(r.sample.len());
-            let looping = match r.loop_mode {
-                LoopMode::Continuous => true,
-                LoopMode::Sustain => v.stage != Stage::Release,
-                _ => false,
-            } && r.loop_end > r.loop_start + 1
-                && r.loop_end <= len;
-            let attack_step = 1.0 / (r.attack * sr).max(1.0);
-            let decay_step = (1.0 - r.sustain) / (r.decay * sr).max(1.0);
-            for i in 0..left.len() {
-                match v.stage {
-                    Stage::Attack => {
-                        v.level += attack_step;
-                        if v.level >= 1.0 {
-                            v.level = 1.0;
-                            v.stage = if r.sustain < 1.0 {
-                                Stage::Decay
-                            } else {
-                                Stage::Sustain
-                            };
-                        }
-                    }
-                    Stage::Decay => {
-                        v.level -= decay_step;
-                        if v.level <= r.sustain {
-                            v.level = r.sustain;
-                            v.stage = Stage::Sustain;
-                        }
-                    }
-                    Stage::Sustain => {}
-                    Stage::Release => {
-                        v.level -= v.release_step;
-                        if v.level <= 0.0 {
-                            *v = Voice::IDLE;
-                            break;
-                        }
-                    }
-                    Stage::Idle => break,
+            match &r.sample.frames {
+                Frames::Stereo(d) => {
+                    render_voice(v, r, sr, left, right, |i| (d[i * 2], d[i * 2 + 1]))
                 }
-                if looping && v.pos >= r.loop_end as f64 {
-                    v.pos -= (r.loop_end - r.loop_start) as f64;
+                Frames::Compact { channels: 1, data } => render_voice(v, r, sr, left, right, |i| {
+                    let x = data[i] as f32 / 32768.0;
+                    (x, x)
+                }),
+                Frames::Compact { data, .. } => render_voice(v, r, sr, left, right, |i| {
+                    (
+                        data[i * 2] as f32 / 32768.0,
+                        data[i * 2 + 1] as f32 / 32768.0,
+                    )
+                }),
+            }
+        }
+    }
+}
+
+/// One voice for one block; `frame` reads sample frame `i` as (left, right).
+fn render_voice(
+    v: &mut Voice,
+    r: &Region,
+    sr: f32,
+    left: &mut [f32],
+    right: &mut [f32],
+    frame: impl Fn(usize) -> (f32, f32),
+) {
+    let len = r.end.min(r.sample.len());
+    let looping = match r.loop_mode {
+        LoopMode::Continuous => true,
+        LoopMode::Sustain => v.stage != Stage::Release,
+        _ => false,
+    } && r.loop_end > r.loop_start + 1
+        && r.loop_end <= len;
+    let attack_step = 1.0 / (r.attack * sr).max(1.0);
+    let decay_step = (1.0 - r.sustain) / (r.decay * sr).max(1.0);
+    for i in 0..left.len() {
+        match v.stage {
+            Stage::Attack => {
+                v.level += attack_step;
+                if v.level >= 1.0 {
+                    v.level = 1.0;
+                    v.stage = if r.sustain < 1.0 {
+                        Stage::Decay
+                    } else {
+                        Stage::Sustain
+                    };
                 }
-                let idx = v.pos as usize;
-                if idx + 1 >= len {
+            }
+            Stage::Decay => {
+                v.level -= decay_step;
+                if v.level <= r.sustain {
+                    v.level = r.sustain;
+                    v.stage = Stage::Sustain;
+                }
+            }
+            Stage::Sustain => {}
+            Stage::Release => {
+                v.level -= v.release_step;
+                if v.level <= 0.0 {
                     *v = Voice::IDLE;
                     break;
                 }
-                let frac = (v.pos - idx as f64) as f32;
-                let (a, b) = (idx * 2, idx * 2 + 2);
-                let l = data[a] + (data[b] - data[a]) * frac;
-                let rr = data[a + 1] + (data[b + 1] - data[a + 1]) * frac;
-                left[i] += l * v.level * v.gain_l;
-                right[i] += rr * v.level * v.gain_r;
-                v.pos += v.step;
             }
+            Stage::Idle => break,
         }
+        if looping && v.pos >= r.loop_end as f64 {
+            v.pos -= (r.loop_end - r.loop_start) as f64;
+        }
+        let idx = v.pos as usize;
+        if idx + 1 >= len {
+            *v = Voice::IDLE;
+            break;
+        }
+        let frac = (v.pos - idx as f64) as f32;
+        let (l0, r0) = frame(idx);
+        let (l1, r1) = frame(idx + 1);
+        left[i] += (l0 + (l1 - l0) * frac) * v.level * v.gain_l;
+        right[i] += (r0 + (r1 - r0) * frac) * v.level * v.gain_r;
+        v.pos += v.step;
     }
 }
 
@@ -347,7 +429,47 @@ mod tests {
             d.push(s);
             d.push(s);
         }
-        Arc::new(SampleData { rate, frames: d })
+        Arc::new(SampleData::stereo(rate, d))
+    }
+
+    fn mono_sine(rate: u32, frames: usize, compact: bool) -> Arc<SampleData> {
+        let s: Vec<f32> = (0..frames)
+            .map(|i| (i as f32 * 440.0 / rate as f32 * std::f32::consts::TAU).sin() * 0.5)
+            .collect();
+        Arc::new(if compact {
+            let q = s.iter().map(|x| (x * 32768.0).round() as i16).collect();
+            SampleData::compact(rate, 1, q)
+        } else {
+            SampleData::stereo(rate, s.iter().flat_map(|&x| [x, x]).collect())
+        })
+    }
+
+    #[test]
+    fn compact_mono_frame_duplicates_channels() {
+        let d = SampleData::compact(44_100, 1, vec![16384, -16384]);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d.frame(0), (0.5, 0.5));
+        assert_eq!(d.frame(1), (-0.5, -0.5));
+        assert_eq!(d.bytes(), 4);
+    }
+
+    #[test]
+    fn compact_and_stereo_render_alike() {
+        let mut a = Sampler::new(
+            Arc::new(vec![Region::whole(mono_sine(48_000, 4800, false), 60)]),
+            48_000,
+        );
+        let mut b = Sampler::new(
+            Arc::new(vec![Region::whole(mono_sine(48_000, 4800, true), 60)]),
+            48_000,
+        );
+        a.note_on(64, 127);
+        b.note_on(64, 127);
+        let (x, y) = (render(&mut a, 2000), render(&mut b, 2000));
+        assert!(peak(&x) > 0.3);
+        for (p, q) in x.iter().zip(&y) {
+            assert!((p - q).abs() <= 1.0 / 16384.0, "{p} vs {q}");
+        }
     }
 
     fn render(s: &mut Sampler, n: usize) -> Vec<f32> {

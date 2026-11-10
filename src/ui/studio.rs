@@ -85,16 +85,24 @@ pub struct Waveform {
 
 impl Waveform {
     pub fn of(data: &SampleData) -> Self {
-        let peaks = data
-            .frames
-            .chunks(FRAMES_PER_PEAK * 2)
-            .map(|c| c.iter().fold(0.0f32, |m, x| m.max(x.abs())).min(1.0))
+        let peaks = (0..data.len())
+            .step_by(FRAMES_PER_PEAK)
+            .map(|start| {
+                let end = (start + FRAMES_PER_PEAK).min(data.len());
+                (start..end)
+                    .map(|i| {
+                        let (l, r) = data.frame(i);
+                        l.abs().max(r.abs())
+                    })
+                    .fold(0.0f32, f32::max)
+                    .min(1.0)
+            })
             .collect();
         let rate = data.rate.max(1) as f64;
         Self {
             peaks,
             seconds_per_peak: FRAMES_PER_PEAK as f64 / rate,
-            seconds: (data.frames.len() / 2) as f64 / rate,
+            seconds: data.len() as f64 / rate,
         }
     }
 
@@ -791,8 +799,10 @@ fn write_wav(path: &Path, data: &SampleData) -> Result<(), String> {
         sample_format: hound::SampleFormat::Float,
     };
     let mut w = hound::WavWriter::create(path, spec).map_err(|e| e.to_string())?;
-    for s in &data.frames {
-        w.write_sample(*s).map_err(|e| e.to_string())?;
+    for i in 0..data.len() {
+        let (l, r) = data.frame(i);
+        w.write_sample(l).map_err(|e| e.to_string())?;
+        w.write_sample(r).map_err(|e| e.to_string())?;
     }
     w.finalize().map_err(|e| e.to_string())
 }
@@ -1014,14 +1024,7 @@ mod voice_tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut s, t, _end) = voice_studio(dir.path());
         let src = dir.path().join("loop.wav");
-        write_wav(
-            &src,
-            &SampleData {
-                rate: 44_100,
-                frames: vec![0.25; 44_100 * 2],
-            },
-        )
-        .unwrap();
+        write_wav(&src, &SampleData::stereo(44_100, vec![0.25; 44_100 * 2])).unwrap();
         s.position = 4.0;
         s.import_audio(&src).unwrap();
         let clip = s.project.track(t).unwrap().clips[0].clone();

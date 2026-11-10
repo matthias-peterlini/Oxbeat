@@ -428,10 +428,7 @@ fn voice_with_clip(at: f64, frames: usize, rate: u32) -> (Project, u64, u64, Arc
     let track = p.add_voice_track();
     p.track_mut(track).unwrap().monitor = false;
     let clip = p.new_id();
-    let data = Arc::new(SampleData {
-        rate,
-        frames: vec![0.5; frames * 2],
-    });
+    let data = Arc::new(SampleData::stereo(rate, vec![0.5; frames * 2]));
     p.track_mut(track).unwrap().clips.push(Clip {
         id: clip,
         start_beat: at,
