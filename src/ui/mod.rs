@@ -77,7 +77,12 @@ impl OxbeatApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
         let (ui_end, engine_end) = link();
-        let mut studio = Studio::new(Studio::starter_project(), ui_end);
+        let packs = crate::sounds::packs::PackManager::new({
+            let ctx = cc.egui_ctx.clone();
+            Arc::new(move || ctx.request_repaint())
+        });
+        let essentials_installed = packs.is_installed(crate::sounds::essentials::ID).is_some();
+        let mut studio = Studio::new(Studio::starter_project(essentials_installed), ui_end);
         let (audio, audio_error) = match output::start(engine_end) {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(e.to_string())),
@@ -112,10 +117,7 @@ impl OxbeatApp {
             export: None,
             notice: None,
             essentials_dismissed: false,
-            add_track: sound_browser::Browser::new(crate::sounds::packs::PackManager::new({
-                let ctx = cc.egui_ctx.clone();
-                Arc::new(move || ctx.request_repaint())
-            })),
+            add_track: sound_browser::Browser::new(packs),
             computer_keys: Vec::new(),
             mouse_note: None,
         };
@@ -229,8 +231,15 @@ impl OxbeatApp {
 
     fn new_project(&mut self) {
         self.bundle = None;
-        self.studio
-            .replace_project(Studio::starter_project(), studio::unsaved_audio_dir());
+        let essentials = self
+            .add_track
+            .packs
+            .is_installed(crate::sounds::essentials::ID)
+            .is_some();
+        self.studio.replace_project(
+            Studio::starter_project(essentials),
+            studio::unsaved_audio_dir(),
+        );
     }
 
     fn open_project(&mut self) {
@@ -243,6 +252,7 @@ impl OxbeatApp {
         match io::load(&dir) {
             Ok(p) => {
                 self.studio.replace_project(p, dir.join(io::AUDIO_DIR));
+                self.studio.mark_on_disk();
                 self.bundle = Some(dir);
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -274,7 +284,10 @@ impl OxbeatApp {
             .move_audio_to(&dir.join(io::AUDIO_DIR))
             .and_then(|()| io::save(&self.studio.project, &dir).map_err(|e| e.to_string()));
         match saved {
-            Ok(()) => self.bundle = Some(dir),
+            Ok(()) => {
+                self.studio.mark_on_disk();
+                self.bundle = Some(dir);
+            }
             Err(e) => self.error = Some(format!("Could not save: {e}")),
         }
     }
@@ -675,6 +688,13 @@ impl eframe::App for OxbeatApp {
             });
 
         sound_browser::show(&ctx, &mut self.studio, &mut self.add_track);
+        // `show` polls the pack manager; a fresh Essentials install upgrades an untouched
+        // starter project to the grand piano.
+        for id in std::mem::take(&mut self.add_track.packs.just_installed) {
+            if id == crate::sounds::essentials::ID && self.studio.upgrade_starter_track() {
+                self.studio.sync();
+            }
+        }
         self.studio.load_errors.append(&mut self.add_track.errors);
         if self.error.is_none() && !self.studio.load_errors.is_empty() {
             self.error = Some(std::mem::take(&mut self.studio.load_errors).join(

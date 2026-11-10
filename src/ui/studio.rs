@@ -14,7 +14,7 @@ use crate::engine::fx::Chain;
 use crate::engine::instrument::{Instrument, sound_hash};
 use crate::engine::sampler::SampleData;
 use crate::project::effects::EffectKind;
-use crate::project::{Clip, Note, Project};
+use crate::project::{Clip, Note, Project, TrackKind};
 
 /// Voice takes shorter than this (an accidental tap of R) are thrown away.
 const MIN_TAKE_SECONDS: f64 = 0.05;
@@ -135,6 +135,8 @@ struct LoadedAudio {
 pub struct Studio {
     pub project: Project,
     history: History,
+    /// The project was opened from, or saved to, disk.
+    on_disk: bool,
     /// The clip picked in the arrangement, if any.
     pub selected_clip: Option<u64>,
     /// Click on every beat while playing.
@@ -186,6 +188,7 @@ impl Studio {
         let selected = project.tracks.first().map_or(0, |t| t.id);
         let mut s = Self {
             history: History::new(&project),
+            on_disk: false,
             selected_clip: None,
             metronome: false,
             count_in: false,
@@ -224,11 +227,39 @@ impl Studio {
         s
     }
 
-    /// A first-launch project: one "Keys" track, ready to play.
-    pub fn starter_project() -> Project {
+    /// A first-launch project: one piano track, ready to play.
+    pub fn starter_project(essentials_installed: bool) -> Project {
         let mut p = Project::default();
-        p.add_instrument_track("Keys");
+        p.add_instrument_track(crate::sounds::default_instrument(essentials_installed));
         p
+    }
+
+    /// The project now has a file on disk (opened or saved): no longer a blank starter.
+    pub fn mark_on_disk(&mut self) {
+        self.on_disk = true;
+    }
+
+    /// Essentials just arrived: move an untouched starter project from "Keys" onto the
+    /// grand piano. Returns true when it did (the caller then syncs).
+    pub fn upgrade_starter_track(&mut self) -> bool {
+        let untouched = !self.on_disk
+            && !self.history.can_undo()
+            && self.project.tracks.len() == 1
+            && self.project.tracks[0].clips.is_empty()
+            && matches!(
+                &self.project.tracks[0].kind,
+                TrackKind::Instrument { preset } if preset == "Keys"
+            );
+        if !untouched {
+            return false;
+        }
+        let t = &mut self.project.tracks[0];
+        t.kind = TrackKind::Instrument {
+            preset: crate::sounds::ESSENTIALS_PIANO.to_string(),
+        };
+        t.name = "Grand Piano".to_string();
+        self.history.reset(&self.project);
+        true
     }
 
     /// Push the current project, and any instruments or audio that changed, to the engine.
@@ -557,6 +588,7 @@ impl Studio {
         }
         self.project = project;
         self.history.reset(&self.project);
+        self.on_disk = false;
         self.selected_clip = None;
         self.audio_dir = audio_dir;
         self.pending.clear();
@@ -827,10 +859,37 @@ mod tests {
     ) {
         let (ui, end) = crate::engine::commands::link();
         (
-            Studio::new(Studio::starter_project(), ui),
+            Studio::new(Studio::starter_project(false), ui),
             end.commands,
             end.events,
         )
+    }
+
+    #[test]
+    fn starter_upgrade_only_when_untouched() {
+        let (mut s, _, _) = studio();
+        assert!(s.upgrade_starter_track());
+        let t = &s.project.tracks[0];
+        assert_eq!(t.sound(), Some(crate::sounds::ESSENTIALS_PIANO));
+        assert_eq!(t.name, "Grand Piano");
+
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.project.add_empty_clip(t, 0.0, 4.0);
+        s.sync();
+        assert!(!s.upgrade_starter_track());
+
+        let (mut s, _, _) = studio();
+        s.replace_project(Studio::starter_project(false), unsaved_audio_dir());
+        s.mark_on_disk();
+        assert!(!s.upgrade_starter_track());
+
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.project.track_mut(t).unwrap().kind = crate::project::TrackKind::Instrument {
+            preset: "Bass".into(),
+        };
+        assert!(!s.upgrade_starter_track());
     }
 
     #[test]
@@ -903,7 +962,7 @@ mod tests {
     fn replacing_project_mid_take_drops_old_take() {
         let (mut s, _, _) = studio();
         s.record();
-        s.replace_project(Studio::starter_project(), unsaved_audio_dir());
+        s.replace_project(Studio::starter_project(false), unsaved_audio_dir());
         let t = s.selected();
         s.apply_event(EngineEvent::RecordedNote {
             track: t,
@@ -1044,7 +1103,7 @@ mod voice_tests {
     #[test]
     fn import_needs_a_voice_track() {
         let (ui, _end) = link();
-        let mut s = Studio::new(Studio::starter_project(), ui);
+        let mut s = Studio::new(Studio::starter_project(false), ui);
         assert!(s.import_audio(Path::new("nope.wav")).is_err());
     }
 }

@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn deleting_the_picked_note_removes_it_from_the_clip() {
         let (ui, _engine) = crate::engine::commands::link();
-        let mut studio = Studio::new(Studio::starter_project(), ui);
+        let mut studio = Studio::new(Studio::starter_project(false), ui);
         let track = studio.selected();
         let clip = studio.project.add_empty_clip(track, 0.0, 4.0).unwrap();
         let note = |pitch| Note {

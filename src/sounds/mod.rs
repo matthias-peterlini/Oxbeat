@@ -32,6 +32,28 @@ pub const BUILTIN_KITS: [(&str, &str); 2] = [
     ("808 Kit", "Deep electronic kick and crisp hats"),
 ];
 
+/// The Essentials pack's grand piano and drum kit (the pack ships exactly these files).
+pub const ESSENTIALS_PIANO: &str = "pack:essentials/Grand Piano.sfz";
+pub const ESSENTIALS_KIT: &str = "pack:essentials/Drums.sfz";
+
+/// The instrument new projects start on.
+pub fn default_instrument(essentials_installed: bool) -> &'static str {
+    if essentials_installed {
+        ESSENTIALS_PIANO
+    } else {
+        "Keys"
+    }
+}
+
+/// The drum kit new drum tracks start on.
+pub fn default_kit(essentials_installed: bool) -> &'static str {
+    if essentials_installed {
+        ESSENTIALS_KIT
+    } else {
+        "Studio Kit"
+    }
+}
+
 /// File types that can be imported as sounds.
 pub const IMPORT_EXTENSIONS: [&str; 7] = ["sf2", "sfz", "wav", "flac", "ogg", "mp3", "aif"];
 
@@ -210,6 +232,14 @@ pub fn load(sound: &str, sample_rate: u32) -> Result<Instrument, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defaults_follow_essentials() {
+        assert_eq!(default_instrument(true), "pack:essentials/Grand Piano.sfz");
+        assert_eq!(default_instrument(false), "Keys");
+        assert_eq!(default_kit(true), "pack:essentials/Drums.sfz");
+        assert_eq!(default_kit(false), "Studio Kit");
+    }
 
     #[test]
     fn every_builtin_loads() {
