@@ -175,7 +175,10 @@
     .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
     .then((rel) => {
       const version = String(rel.tag_name || "").replace(/^v/, "");
-      if (version) document.getElementById("dl-version").textContent = version;
+      if (version) {
+        document.getElementById("dl-version").textContent = version;
+        document.getElementById("meta-version").textContent = version;
+      }
       const found = {};
       document.querySelectorAll(".downloads li").forEach((li) => {
         const asset = (rel.assets || []).find((a) => match[li.dataset.os](a.name));
