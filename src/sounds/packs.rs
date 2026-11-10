@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -51,17 +52,28 @@ pub fn parse_index(text: &str) -> Result<Vec<IndexEntry>, String> {
         .collect())
 }
 
+/// An HTTP client that gives up on a dead connection instead of waiting forever.
+/// The read timeout is per read, so a slow but moving download never trips it.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_resolve(Some(Duration::from_secs(15)))
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_per_read(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent()
+}
+
 fn fetch_index() -> Result<Vec<IndexEntry>, String> {
-    let mut resp = ureq::get(INDEX_URL).call().map_err(friendly)?;
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| e.to_string())?;
+    let mut resp = agent().get(INDEX_URL).call().map_err(friendly)?;
+    let text = resp.body_mut().read_to_string().map_err(friendly)?;
     parse_index(&text)
 }
 
 fn friendly(e: ureq::Error) -> String {
+    const TIMED_OUT: &str = "The connection timed out. Check your internet and try again.";
     match e {
+        ureq::Error::Timeout(_) => TIMED_OUT.into(),
+        ureq::Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => TIMED_OUT.into(),
         ureq::Error::StatusCode(404) => "The sound library isn't published yet.".into(),
         ureq::Error::StatusCode(c) => format!("The server answered {c}."),
         ureq::Error::Io(_) | ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => {
@@ -82,7 +94,7 @@ pub fn install(entry: &IndexEntry, dest_root: &Path, report: &dyn Fn(u32)) -> Re
     std::fs::create_dir_all(dest_root).map_err(|e| e.to_string())?;
     let zip_path = dest_root.join(format!(".download-{}.zip", entry.id));
     let result = (|| {
-        let mut resp = ureq::get(&entry.url).call().map_err(friendly)?;
+        let mut resp = agent().get(&entry.url).call().map_err(friendly)?;
         let total = resp
             .headers()
             .get("content-length")
@@ -96,7 +108,7 @@ pub fn install(entry: &IndexEntry, dest_root: &Path, report: &dyn Fn(u32)) -> Re
         let mut buf = vec![0u8; 256 * 1024];
         let mut done = 0u64;
         loop {
-            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = reader.read(&mut buf).map_err(|e| friendly(e.into()))?;
             if n == 0 {
                 break;
             }
@@ -479,6 +491,22 @@ mod tests {
         make_zip(&z, &[("pack.json", MANIFEST)]);
         assert!(extract_pack(&z, dir.path(), "other").is_err());
         assert!(!dir.path().join("other").exists());
+    }
+
+    #[test]
+    fn timeouts_read_as_plain_english() {
+        let msg = "The connection timed out. Check your internet and try again.";
+        assert_eq!(friendly(ureq::Error::Timeout(ureq::Timeout::Connect)), msg);
+        assert_eq!(friendly(ureq::Error::Timeout(ureq::Timeout::PerRead)), msg);
+        let io = std::io::Error::from(std::io::ErrorKind::TimedOut);
+        assert_eq!(friendly(ureq::Error::Io(io)), msg);
+        // A stalled body read comes back as an io::Error wrapping ureq's.
+        let wrapped = std::io::Error::other(ureq::Error::Timeout(ureq::Timeout::PerRead));
+        assert_eq!(friendly(wrapped.into()), msg);
+        assert_eq!(
+            friendly(ureq::Error::ConnectionFailed),
+            "No internet connection."
+        );
     }
 
     #[test]
