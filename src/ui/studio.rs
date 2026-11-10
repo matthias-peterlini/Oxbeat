@@ -138,6 +138,8 @@ pub struct Studio {
     history: History,
     /// The project was opened from, or saved to, disk.
     on_disk: bool,
+    /// Essentials arrived mid-playback or mid-take; upgrade the starter once stopped.
+    starter_upgrade_waiting: bool,
     /// The clip picked in the arrangement, if any.
     pub selected_clip: Option<u64>,
     /// Click on every beat while playing.
@@ -201,6 +203,7 @@ impl Studio {
         let mut s = Self {
             history: History::new(&project),
             on_disk: false,
+            starter_upgrade_waiting: false,
             selected_clip: None,
             metronome: false,
             count_in: false,
@@ -254,8 +257,14 @@ impl Studio {
     }
 
     /// Essentials just arrived: move an untouched starter project from "Keys" onto the
-    /// grand piano. Returns true when it did (the caller then syncs).
+    /// grand piano. Returns true when it did (the caller then syncs). While playing or
+    /// recording it waits, and `drain_events` applies it once stopped.
     pub fn upgrade_starter_track(&mut self) -> bool {
+        if self.playing || self.recording {
+            self.starter_upgrade_waiting = true;
+            return false;
+        }
+        self.starter_upgrade_waiting = false;
         let untouched = !self.on_disk
             && !self.history.can_undo()
             && self.project.tracks.len() == 1
@@ -710,6 +719,12 @@ impl Studio {
             self.apply_event(e);
         }
         self.poll_loads();
+        if self.starter_upgrade_waiting && !self.playing && !self.recording {
+            // Still decided by whether the project is untouched now.
+            if self.upgrade_starter_track() {
+                self.sync();
+            }
+        }
     }
 
     pub fn apply_event(&mut self, e: EngineEvent) {
@@ -1076,6 +1091,54 @@ mod tests {
             vec![sound_hash("file:/b.sfz")]
         );
         drop(gate);
+    }
+
+    #[test]
+    fn starter_upgrade_waits_until_stopped() {
+        let piano = Some(crate::sounds::ESSENTIALS_PIANO);
+        // Playing: deferred, then applied once stopped.
+        let (mut s, _, _) = studio();
+        s.play_stop();
+        assert!(!s.upgrade_starter_track());
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), Some("Keys"));
+        s.play_stop();
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), piano);
+        assert!(!s.can_undo());
+
+        // Recording (or counting in): same.
+        let (mut s, _, _) = studio();
+        s.record();
+        assert!(!s.upgrade_starter_track());
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), Some("Keys"));
+        s.record(); // stops
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), piano);
+
+        // A take recorded meanwhile means the project is no longer untouched.
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.record();
+        assert!(!s.upgrade_starter_track());
+        s.apply_event(EngineEvent::RecordedNote {
+            track: t,
+            note: Note {
+                pitch: 60,
+                velocity: 100,
+                start_beat: 0.5,
+                length_beats: 1.0,
+            },
+        });
+        s.apply_event(EngineEvent::RecordFinished {
+            track: t,
+            start_beat: 0.0,
+            length_beats: 4.0,
+        });
+        s.record();
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), Some("Keys"));
     }
 
     #[test]
