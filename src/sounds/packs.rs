@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use super::essentials;
 use super::library::{self, PackManifest, is_safe_id, packs_dir};
 
 pub const INDEX_URL: &str =
@@ -50,17 +52,28 @@ pub fn parse_index(text: &str) -> Result<Vec<IndexEntry>, String> {
         .collect())
 }
 
+/// An HTTP client that gives up on a dead connection instead of waiting forever.
+/// The read timeout is per read, so a slow but moving download never trips it.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_resolve(Some(Duration::from_secs(15)))
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_per_read(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent()
+}
+
 fn fetch_index() -> Result<Vec<IndexEntry>, String> {
-    let mut resp = ureq::get(INDEX_URL).call().map_err(friendly)?;
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| e.to_string())?;
+    let mut resp = agent().get(INDEX_URL).call().map_err(friendly)?;
+    let text = resp.body_mut().read_to_string().map_err(friendly)?;
     parse_index(&text)
 }
 
 fn friendly(e: ureq::Error) -> String {
+    const TIMED_OUT: &str = "The connection timed out. Check your internet and try again.";
     match e {
+        ureq::Error::Timeout(_) => TIMED_OUT.into(),
+        ureq::Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => TIMED_OUT.into(),
         ureq::Error::StatusCode(404) => "The sound library isn't published yet.".into(),
         ureq::Error::StatusCode(c) => format!("The server answered {c}."),
         ureq::Error::Io(_) | ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => {
@@ -81,7 +94,7 @@ pub fn install(entry: &IndexEntry, dest_root: &Path, report: &dyn Fn(u32)) -> Re
     std::fs::create_dir_all(dest_root).map_err(|e| e.to_string())?;
     let zip_path = dest_root.join(format!(".download-{}.zip", entry.id));
     let result = (|| {
-        let mut resp = ureq::get(&entry.url).call().map_err(friendly)?;
+        let mut resp = agent().get(&entry.url).call().map_err(friendly)?;
         let total = resp
             .headers()
             .get("content-length")
@@ -95,7 +108,7 @@ pub fn install(entry: &IndexEntry, dest_root: &Path, report: &dyn Fn(u32)) -> Re
         let mut buf = vec![0u8; 256 * 1024];
         let mut done = 0u64;
         loop {
-            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = reader.read(&mut buf).map_err(|e| friendly(e.into()))?;
             if n == 0 {
                 break;
             }
@@ -180,6 +193,27 @@ fn pack_root(dir: &Path) -> Option<PathBuf> {
     only.path().join("pack.json").is_file().then(|| only.path())
 }
 
+/// Delete what an interrupted download left in `dir` (`.download-*.zip` files and
+/// `.unpack-*` folders). Call before any download starts.
+pub fn sweep_temp(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let p = e.path();
+        if name.starts_with(".download-") && name.ends_with(".zip") {
+            let _ = std::fs::remove_file(&p);
+        } else if name.starts_with(".unpack-") {
+            let _ = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
+        }
+    }
+}
+
 pub fn remove(id: &str) -> Result<(), String> {
     if !is_safe_id(id) {
         return Err("bad pack id".into());
@@ -191,6 +225,14 @@ pub enum IndexState {
     NotLoaded,
     Loading,
     Ready(Vec<IndexEntry>),
+    Failed(String),
+}
+
+/// What the "instrument library" strip should show.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EssentialsStatus {
+    Hidden,
+    Downloading { permille: u32, size: u64 },
     Failed(String),
 }
 
@@ -206,6 +248,12 @@ pub struct PackManager {
     /// Pack id -> progress in permille.
     pub downloads: HashMap<String, Arc<AtomicU32>>,
     pub errors: Vec<String>,
+    /// Ids of packs installed since the app started. Callers drain it.
+    pub just_installed: Vec<String>,
+    essentials: essentials::State,
+    /// The auto-install was started this session; don't start it again.
+    essentials_tried: bool,
+    essentials_error: Option<String>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     repaint: Arc<dyn Fn() + Send + Sync>,
@@ -214,11 +262,17 @@ pub struct PackManager {
 impl PackManager {
     pub fn new(repaint: Arc<dyn Fn() + Send + Sync>) -> PackManager {
         let (tx, rx) = channel();
+        // Nothing is downloading yet, so anything temporary is from a quit mid-download.
+        sweep_temp(&packs_dir());
         PackManager {
             index: IndexState::NotLoaded,
             installed: library::installed_packs(),
             downloads: HashMap::new(),
             errors: Vec::new(),
+            just_installed: Vec::new(),
+            essentials: essentials::load(&packs_dir()),
+            essentials_tried: false,
+            essentials_error: None,
             tx,
             rx,
             repaint,
@@ -256,6 +310,10 @@ impl PackManager {
         if self.downloads.contains_key(&entry.id) {
             return;
         }
+        if entry.id == essentials::ID {
+            self.set_removed_by_user(false);
+            self.essentials_error = None;
+        }
         let progress = Arc::new(AtomicU32::new(0));
         self.downloads.insert(entry.id.clone(), progress.clone());
         let tx = self.tx.clone();
@@ -274,8 +332,85 @@ impl PackManager {
     pub fn uninstall(&mut self, id: &str) {
         if let Err(e) = remove(id) {
             self.errors.push(format!("Could not remove the pack: {e}"));
+        } else if id == essentials::ID {
+            self.set_removed_by_user(true);
         }
         self.refresh_installed();
+    }
+
+    fn set_removed_by_user(&mut self, removed: bool) {
+        if self.essentials.removed_by_user != removed {
+            self.essentials.removed_by_user = removed;
+            essentials::save(&packs_dir(), &self.essentials);
+        }
+    }
+
+    fn essentials_wanted(&self) -> bool {
+        essentials::should_auto_install(
+            self.is_installed(essentials::ID).is_some(),
+            self.downloads.contains_key(essentials::ID),
+            &self.essentials,
+        )
+    }
+
+    /// Call every frame. Downloads the essentials pack once per launch when it is
+    /// missing and the user hasn't removed it.
+    pub fn ensure_essentials(&mut self) {
+        if self.essentials_tried || !self.essentials_wanted() {
+            return;
+        }
+        match &self.index {
+            IndexState::NotLoaded => self.load_index(),
+            IndexState::Loading | IndexState::Failed(_) => {}
+            IndexState::Ready(list) => {
+                // Not published yet: stay quiet.
+                if let Some(entry) = list.iter().find(|e| e.id == essentials::ID).cloned() {
+                    self.essentials_tried = true;
+                    self.install(entry);
+                }
+            }
+        }
+    }
+
+    /// The user asked for the instruments ("Install instruments"): allow and start
+    /// the download even after a removal or a failure.
+    pub fn request_essentials(&mut self) {
+        self.set_removed_by_user(false);
+        self.essentials_tried = false;
+        self.essentials_error = None;
+        if matches!(self.index, IndexState::Failed(_)) {
+            self.retry_index();
+        }
+    }
+
+    /// True while Essentials is not installed, so the Library tab can offer it.
+    pub fn essentials_missing(&self) -> bool {
+        self.is_installed(essentials::ID).is_none()
+    }
+
+    pub fn essentials_status(&self) -> EssentialsStatus {
+        if let Some(p) = self.downloads.get(essentials::ID) {
+            let size = match &self.index {
+                IndexState::Ready(list) => list
+                    .iter()
+                    .find(|e| e.id == essentials::ID)
+                    .map_or(0, |e| e.size),
+                _ => 0,
+            };
+            return EssentialsStatus::Downloading {
+                permille: p.load(Ordering::Relaxed),
+                size,
+            };
+        }
+        if let Some(e) = &self.essentials_error {
+            return EssentialsStatus::Failed(e.clone());
+        }
+        if self.essentials_wanted()
+            && let IndexState::Failed(e) = &self.index
+        {
+            return EssentialsStatus::Failed(e.clone());
+        }
+        EssentialsStatus::Hidden
     }
 
     /// Apply finished background work. Returns true if the installed list changed.
@@ -287,8 +422,11 @@ impl PackManager {
                 Msg::Index(Err(e)) => self.index = IndexState::Failed(e),
                 Msg::Installed(id, r) => {
                     self.downloads.remove(&id);
-                    if let Err(e) = r {
-                        self.errors.push(format!("Could not install the pack: {e}"));
+                    match r {
+                        Ok(()) => self.just_installed.push(id),
+                        // The strip reports this one; no modal for a background download.
+                        Err(e) if id == essentials::ID => self.essentials_error = Some(e),
+                        Err(e) => self.errors.push(format!("Could not install the pack: {e}")),
                     }
                     changed = true;
                 }
@@ -353,6 +491,40 @@ mod tests {
         make_zip(&z, &[("pack.json", MANIFEST)]);
         assert!(extract_pack(&z, dir.path(), "other").is_err());
         assert!(!dir.path().join("other").exists());
+    }
+
+    #[test]
+    fn timeouts_read_as_plain_english() {
+        let msg = "The connection timed out. Check your internet and try again.";
+        assert_eq!(friendly(ureq::Error::Timeout(ureq::Timeout::Connect)), msg);
+        assert_eq!(friendly(ureq::Error::Timeout(ureq::Timeout::PerRead)), msg);
+        let io = std::io::Error::from(std::io::ErrorKind::TimedOut);
+        assert_eq!(friendly(ureq::Error::Io(io)), msg);
+        // A stalled body read comes back as an io::Error wrapping ureq's.
+        let wrapped = std::io::Error::other(ureq::Error::Timeout(ureq::Timeout::PerRead));
+        assert_eq!(friendly(wrapped.into()), msg);
+        assert_eq!(
+            friendly(ureq::Error::ConnectionFailed),
+            "No internet connection."
+        );
+    }
+
+    #[test]
+    fn sweeps_leftover_download_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join(".download-essentials.zip"), "partial").unwrap();
+        std::fs::create_dir_all(d.join(".unpack-essentials/samples")).unwrap();
+        std::fs::write(d.join(".unpack-essentials/samples/a.flac"), "x").unwrap();
+        std::fs::create_dir_all(d.join("demo")).unwrap();
+        std::fs::write(d.join("demo/pack.json"), MANIFEST).unwrap();
+        std::fs::write(d.join("essentials.json"), "{}").unwrap();
+        sweep_temp(d);
+        assert!(!d.join(".download-essentials.zip").exists());
+        assert!(!d.join(".unpack-essentials").exists());
+        assert!(d.join("demo/pack.json").is_file());
+        assert!(d.join("essentials.json").is_file());
+        sweep_temp(&d.join("missing")); // no packs dir yet: nothing to do
     }
 
     #[test]

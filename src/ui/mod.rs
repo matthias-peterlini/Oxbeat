@@ -4,6 +4,7 @@ mod effects_panel;
 mod history;
 mod icons;
 mod keyboard_strip;
+mod loader;
 mod mixer;
 mod piano_roll;
 mod sound_browser;
@@ -33,7 +34,7 @@ const KEY_VELOCITY: u8 = 100;
 const INPUT_RETRY: Duration = Duration::from_secs(2);
 
 pub use theme::apply as apply_theme;
-use theme::{BG, BORDER, RECORD, SURFACE};
+use theme::{BG, BORDER, RECORD, SURFACE, TEXT_DIM};
 
 /// What the panel along the bottom shows.
 #[derive(Clone, Copy, PartialEq)]
@@ -64,6 +65,8 @@ pub struct OxbeatApp {
     export: Option<(mpsc::Receiver<crate::export::Update>, f32)>,
     /// Good news to show (e.g. where the exported song went).
     notice: Option<String>,
+    /// The instrument-library strip was closed (until the next launch).
+    essentials_dismissed: bool,
     add_track: sound_browser::Browser,
     /// Computer keys currently down -> pitch they started.
     computer_keys: Vec<(Key, u8)>,
@@ -75,13 +78,25 @@ impl OxbeatApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
         let (ui_end, engine_end) = link();
-        let mut studio = Studio::new(Studio::starter_project(), ui_end);
+        let packs = crate::sounds::packs::PackManager::new({
+            let ctx = cc.egui_ctx.clone();
+            Arc::new(move || ctx.request_repaint())
+        });
+        let essentials_installed = packs.is_installed(crate::sounds::essentials::ID).is_some();
         let (audio, audio_error) = match output::start(engine_end) {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(e.to_string())),
         };
-        if let Some(a) = &audio {
-            studio.set_sample_rate(a.sample_rate());
+        // Built at the device's rate straight away, so the starter piano loads once
+        // (in the background).
+        let studio = Studio::with_sample_rate(
+            Studio::starter_project(essentials_installed),
+            ui_end,
+            audio.as_ref().map_or(48_000, |a| a.sample_rate()),
+        );
+        {
+            let ctx = cc.egui_ctx.clone();
+            studio.set_repaint(move || ctx.request_repaint());
         }
 
         let shared = studio.shared.clone();
@@ -109,10 +124,8 @@ impl OxbeatApp {
             error: None,
             export: None,
             notice: None,
-            add_track: sound_browser::Browser::new(crate::sounds::packs::PackManager::new({
-                let ctx = cc.egui_ctx.clone();
-                Arc::new(move || ctx.request_repaint())
-            })),
+            essentials_dismissed: false,
+            add_track: sound_browser::Browser::new(packs),
             computer_keys: Vec::new(),
             mouse_note: None,
         };
@@ -226,8 +239,15 @@ impl OxbeatApp {
 
     fn new_project(&mut self) {
         self.bundle = None;
-        self.studio
-            .replace_project(Studio::starter_project(), studio::unsaved_audio_dir());
+        let essentials = self
+            .add_track
+            .packs
+            .is_installed(crate::sounds::essentials::ID)
+            .is_some();
+        self.studio.replace_project(
+            Studio::starter_project(essentials),
+            studio::unsaved_audio_dir(),
+        );
     }
 
     fn open_project(&mut self) {
@@ -240,6 +260,7 @@ impl OxbeatApp {
         match io::load(&dir) {
             Ok(p) => {
                 self.studio.replace_project(p, dir.join(io::AUDIO_DIR));
+                self.studio.mark_on_disk();
                 self.bundle = Some(dir);
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -271,7 +292,10 @@ impl OxbeatApp {
             .move_audio_to(&dir.join(io::AUDIO_DIR))
             .and_then(|()| io::save(&self.studio.project, &dir).map_err(|e| e.to_string()));
         match saved {
-            Ok(()) => self.bundle = Some(dir),
+            Ok(()) => {
+                self.studio.mark_on_disk();
+                self.bundle = Some(dir);
+            }
             Err(e) => self.error = Some(format!("Could not save: {e}")),
         }
     }
@@ -496,6 +520,52 @@ impl OxbeatApp {
             }
         }
     }
+
+    /// A slim, dismissible strip while the instrument library downloads or fails.
+    fn essentials_strip(&mut self, ui: &mut egui::Ui) {
+        use crate::sounds::packs::EssentialsStatus;
+        if self.essentials_dismissed {
+            return;
+        }
+        let text = match self.add_track.packs.essentials_status() {
+            EssentialsStatus::Hidden => return,
+            EssentialsStatus::Downloading { permille, size } => {
+                let mut t = format!("Downloading the instrument library… {}%", permille / 10);
+                if size > 0 {
+                    let mb = |b: f64| b / 1_048_576.0;
+                    t += &format!(
+                        " ({:.0} of {:.0} MB)",
+                        mb(size as f64 * permille as f64 / 1000.0),
+                        mb(size as f64)
+                    );
+                }
+                t
+            }
+            EssentialsStatus::Failed(e) => format!(
+                "Couldn't download the instrument library: {e} Oxbeat will try again next time."
+            ),
+        };
+        egui::Panel::top("essentials-strip")
+            .frame(
+                egui::Frame::NONE
+                    .fill(SURFACE)
+                    .inner_margin(egui::Margin::symmetric(16, 6))
+                    .stroke(egui::Stroke::new(1.0, BORDER)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(text).color(TEXT_DIM));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::icon_button(ui, icons::X, 22.0, false)
+                            .on_hover_text("Hide")
+                            .clicked()
+                        {
+                            self.essentials_dismissed = true;
+                        }
+                    });
+                });
+            });
+    }
 }
 
 impl eframe::App for OxbeatApp {
@@ -523,7 +593,6 @@ impl eframe::App for OxbeatApp {
         };
         ctx.request_repaint_after(next);
     }
-
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_keys(&ctx);
@@ -548,6 +617,9 @@ impl eframe::App for OxbeatApp {
                     }
                 });
         }
+
+        self.add_track.packs.ensure_essentials();
+        self.essentials_strip(ui);
 
         let mut action = top_bar::Action::None;
         egui::Panel::top("top-bar")
@@ -624,6 +696,13 @@ impl eframe::App for OxbeatApp {
             });
 
         sound_browser::show(&ctx, &mut self.studio, &mut self.add_track);
+        // `show` polls the pack manager; a fresh Essentials install upgrades an untouched
+        // starter project to the grand piano.
+        for id in std::mem::take(&mut self.add_track.packs.just_installed) {
+            if id == crate::sounds::essentials::ID && self.studio.upgrade_starter_track() {
+                self.studio.sync();
+            }
+        }
         self.studio.load_errors.append(&mut self.add_track.errors);
         if self.error.is_none() && !self.studio.load_errors.is_empty() {
             self.error = Some(std::mem::take(&mut self.studio.load_errors).join(

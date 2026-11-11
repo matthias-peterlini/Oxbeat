@@ -15,7 +15,58 @@ use crate::engine::sampler::SampleData;
 /// Longest file we will load into memory (about 10 minutes of stereo at 48 kHz).
 const MAX_FRAMES: usize = 48_000 * 60 * 10;
 
+/// Stereo f32, for recordings and audio clips.
 pub fn decode_file(path: &Path) -> Result<SampleData, String> {
+    let mut rate = 0;
+    let mut frames: Vec<f32> = Vec::new();
+    decode_with(path, |r, channels, buf| {
+        rate = r;
+        for frame in buf.chunks(channels) {
+            let (l, r) = if channels == 1 {
+                (frame[0], frame[0])
+            } else {
+                (frame[0], frame[1])
+            };
+            frames.push(l);
+            frames.push(r);
+        }
+        frames.len() / 2
+    })?;
+    if frames.is_empty() || rate == 0 {
+        return Err("the file contains no audio".into());
+    }
+    Ok(SampleData::stereo(rate, frames))
+}
+
+/// 16-bit for instrument samples; mono stays mono, more than two channels keep the first two.
+pub fn decode_compact(path: &Path) -> Result<SampleData, String> {
+    let mut rate = 0;
+    let mut out_channels = 0usize;
+    let mut data: Vec<i16> = Vec::new();
+    decode_with(path, |r, channels, buf| {
+        rate = r;
+        if out_channels == 0 {
+            out_channels = channels.min(2);
+        }
+        for frame in buf.chunks(channels) {
+            for &x in &frame[..out_channels] {
+                data.push((x * 32767.0).round().clamp(-32768.0, 32767.0) as i16);
+            }
+        }
+        data.len() / out_channels
+    })?;
+    if data.is_empty() || rate == 0 {
+        return Err("the file contains no audio".into());
+    }
+    Ok(SampleData::compact(rate, out_channels as u8, data))
+}
+
+/// Feeds each decoded packet to `sink(rate, channels, interleaved)`; the sink returns
+/// the frames collected so far, to enforce the length limit.
+fn decode_with(
+    path: &Path,
+    mut sink: impl FnMut(u32, usize, &[f32]) -> usize,
+) -> Result<(), String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -43,8 +94,6 @@ pub fn decode_file(path: &Path) -> Result<SampleData, String> {
         .map_err(|e| format!("unsupported codec ({e})"))?;
     let track_id = track.id;
 
-    let mut frames: Vec<f32> = Vec::new();
-    let mut rate = 0;
     let mut buf: Vec<f32> = Vec::new();
     loop {
         let packet = match format.next_packet() {
@@ -61,32 +110,20 @@ pub fn decode_file(path: &Path) -> Result<SampleData, String> {
             Err(Error::DecodeError(_)) => continue,
             Err(e) => return Err(e.to_string()),
         };
-        rate = audio.spec().rate();
         let channels = audio.spec().channels().count().max(1);
         buf.resize(audio.samples_interleaved(), 0.0);
         audio.copy_to_slice_interleaved(&mut buf);
-        for frame in buf.chunks(channels) {
-            let (l, r) = if channels == 1 {
-                (frame[0], frame[0])
-            } else {
-                (frame[0], frame[1])
-            };
-            frames.push(l);
-            frames.push(r);
-        }
-        if frames.len() / 2 > MAX_FRAMES {
+        if sink(audio.spec().rate(), channels, &buf) > MAX_FRAMES {
             return Err("file is too long".into());
         }
     }
-    if frames.is_empty() || rate == 0 {
-        return Err("the file contains no audio".into());
-    }
-    Ok(SampleData { rate, frames })
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::sampler::Frames;
 
     #[test]
     fn decodes_mono_wav_to_stereo() {
@@ -107,8 +144,52 @@ mod tests {
         let d = decode_file(&path).unwrap();
         assert_eq!(d.rate, 22_050);
         assert_eq!(d.len(), 1000);
-        assert!((d.frames[0] - 0.488).abs() < 0.01);
-        assert_eq!(d.frames[0], d.frames[1]);
+        let (l, r) = d.frame(0);
+        assert!((l - 0.488).abs() < 0.01);
+        assert_eq!(l, r);
+    }
+
+    #[test]
+    fn decode_compact_keeps_mono() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 22_050,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..1000 {
+            w.write_sample(16_000i16).unwrap();
+        }
+        w.finalize().unwrap();
+        let d = decode_compact(&path).unwrap();
+        assert!(matches!(d.frames, Frames::Compact { channels: 1, .. }));
+        assert_eq!(d.len(), 1000);
+        assert_eq!(d.rate, 22_050);
+    }
+
+    #[test]
+    fn decode_compact_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..10 {
+            w.write_sample(1.5f32).unwrap();
+        }
+        w.finalize().unwrap();
+        let d = decode_compact(&path).unwrap();
+        let Frames::Compact { data, .. } = &d.frames else {
+            panic!("not compact")
+        };
+        assert_eq!(data[0], i16::MAX);
     }
 
     #[test]

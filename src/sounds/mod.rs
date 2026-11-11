@@ -6,6 +6,7 @@
 //! - `pack:<pack-id>/<file in pack>[#bank:program]` a sound from a downloaded pack
 
 pub mod decode;
+pub mod essentials;
 pub mod library;
 pub mod packs;
 pub mod sfz;
@@ -30,6 +31,28 @@ pub const BUILTIN_KITS: [(&str, &str); 2] = [
     ("Studio Kit", "Punchy acoustic-style kit"),
     ("808 Kit", "Deep electronic kick and crisp hats"),
 ];
+
+/// The Essentials pack's grand piano and drum kit (the pack ships exactly these files).
+pub const ESSENTIALS_PIANO: &str = "pack:essentials/Grand Piano.sfz";
+pub const ESSENTIALS_KIT: &str = "pack:essentials/Drums.sfz";
+
+/// The instrument new projects start on.
+pub fn default_instrument(essentials_installed: bool) -> &'static str {
+    if essentials_installed {
+        ESSENTIALS_PIANO
+    } else {
+        "Keys"
+    }
+}
+
+/// The drum kit new drum tracks start on.
+pub fn default_kit(essentials_installed: bool) -> &'static str {
+    if essentials_installed {
+        ESSENTIALS_KIT
+    } else {
+        "Studio Kit"
+    }
+}
 
 /// File types that can be imported as sounds.
 pub const IMPORT_EXTENSIONS: [&str; 7] = ["sf2", "sfz", "wav", "flac", "ogg", "mp3", "aif"];
@@ -113,7 +136,7 @@ fn sample(path: &Path) -> Result<Arc<SampleData>, String> {
     if let Some(s) = with_cache(|c| c.samples.get(path).and_then(Weak::upgrade)) {
         return Ok(s);
     }
-    let s = Arc::new(decode::decode_file(path)?);
+    let s = Arc::new(decode::decode_compact(path)?);
     with_cache(|c| c.samples.insert(path.to_path_buf(), Arc::downgrade(&s)));
     Ok(s)
 }
@@ -211,6 +234,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn defaults_follow_essentials() {
+        assert_eq!(default_instrument(true), "pack:essentials/Grand Piano.sfz");
+        assert_eq!(default_instrument(false), "Keys");
+        assert_eq!(default_kit(true), "pack:essentials/Drums.sfz");
+        assert_eq!(default_kit(false), "Studio Kit");
+    }
+
+    #[test]
     fn every_builtin_loads() {
         for (id, _) in BUILTIN_INSTRUMENTS.iter().chain(&BUILTIN_KITS) {
             assert!(load(id, 48_000).is_ok(), "{id}");
@@ -245,13 +276,14 @@ mod tests {
         );
     }
 
-    /// Loads real libraries from `$OXBEAT_REAL_SOUNDS` (GeneralUser GS as gu.sf2,
-    /// SamsSonor-master/, Ixox.Flute-master/). Run with `cargo test -- --ignored`.
+    /// Loads the unpacked Oxbeat Essentials pack from `$OXBEAT_REAL_SOUNDS`, plays
+    /// its defaults, and checks that all of its SFZ samples fit in 600 MB of RAM.
+    /// Run with `cargo test --release loads_real_libraries -- --ignored`.
     #[test]
     #[ignore]
     fn loads_real_libraries() {
         let dir = PathBuf::from(std::env::var("OXBEAT_REAL_SOUNDS").unwrap());
-        let gu = dir.join("gu.sf2");
+        let gu = dir.join("GeneralUser-GS.sf2");
         let presets = soundfont_presets(&gu).unwrap();
         for (bank, program) in [
             (0, 0),
@@ -289,14 +321,8 @@ mod tests {
                 ),
                 38,
             ),
-            (
-                file_sound(&dir.join("SamsSonor-master/SamsSonor.sfz"), None),
-                38,
-            ),
-            (
-                file_sound(&dir.join("Ixox.Flute-master/Ixox Flute.sfz"), None),
-                72,
-            ),
+            (file_sound(&dir.join("Grand Piano.sfz"), None), 60),
+            (file_sound(&dir.join("Drums.sfz"), None), 38),
         ];
         for (id, note) in ids {
             let t = std::time::Instant::now();
@@ -309,6 +335,37 @@ mod tests {
             println!("  peak {peak}");
             assert!(peak > 0.01, "{id} silent");
         }
+
+        // Every SFZ in the pack, decoded, must fit the memory budget. Samples are
+        // shared through the cache, so each one is counted once.
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| ext(p) == "sfz")
+            .collect();
+        files.sort();
+        assert!(files.len() >= 2, "no .sfz files in {}", dir.display());
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0usize;
+        let mut keep = Vec::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let parsed = sfz::parse(&text, &dir).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            let regions = sfz::build_regions(&parsed, sample)
+                .unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            let mut own = 0usize;
+            for r in &regions {
+                if seen.insert(Arc::as_ptr(&r.sample) as usize) {
+                    own += r.sample.bytes();
+                }
+            }
+            total += own;
+            println!("{:7.1} MB  {}", own as f64 / 1048576.0, f.display());
+            keep.push(regions); // hold the samples so the cache can't drop them
+        }
+        println!("{:7.1} MB  total", total as f64 / 1048576.0);
+        assert!(total < 600 * 1048576, "{total} bytes of samples");
     }
 
     /// Every .sfz under `$OXBEAT_REAL_SOUNDS` must load and make sound at some key.
@@ -349,6 +406,72 @@ mod tests {
                 }
             }
         }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// Every .sfz under `$OXBEAT_REAL_SOUNDS` with looping regions must keep
+    /// sounding while a note is held for 8 s, at the middle of each looping
+    /// region's key and velocity range.
+    #[test]
+    #[ignore]
+    fn every_real_looping_sfz_holds() {
+        use crate::engine::sampler::LoopMode;
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if ext(&p) == "sfz" {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            Path::new(&std::env::var("OXBEAT_REAL_SOUNDS").unwrap()),
+            &mut files,
+        );
+        files.sort();
+        let (mut failures, mut tested) = (Vec::new(), 0);
+        for f in files {
+            let text = String::from_utf8_lossy(&std::fs::read(&f).unwrap()).into_owned();
+            let parsed = sfz::parse(&text, f.parent().unwrap()).unwrap();
+            let regions = Arc::new(sfz::build_regions(&parsed, sample).unwrap());
+            let mut keys: Vec<(u8, u8)> = regions
+                .iter()
+                .filter(|r| matches!(r.loop_mode, LoopMode::Continuous | LoopMode::Sustain))
+                .map(|r| {
+                    let vel = ((r.lovel as u16 + r.hivel as u16) / 2).max(1) as u8;
+                    (((r.lokey as u16 + r.hikey as u16) / 2) as u8, vel)
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            if keys.is_empty() {
+                continue;
+            }
+            tested += 1;
+            for (key, vel) in keys {
+                let mut s = Sampler::new(Arc::clone(&regions), 48_000);
+                s.note_on(key, vel);
+                let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+                for _ in 0..79 {
+                    s.render(&mut l, &mut r);
+                }
+                l.fill(0.0);
+                r.fill(0.0);
+                s.render(&mut l, &mut r);
+                let peak = l.iter().chain(&r).fold(0.0f32, |m, x| m.max(x.abs()));
+                if peak < 0.001 {
+                    failures.push(format!(
+                        "{} key {key} vel {vel}: silent at 8 s",
+                        f.display()
+                    ));
+                }
+            }
+        }
+        println!("{tested} looping sfz files held");
+        assert!(tested > 0, "no looping sfz files found");
         assert!(failures.is_empty(), "{failures:#?}");
     }
 

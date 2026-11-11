@@ -10,7 +10,8 @@ use super::icons;
 use super::studio::Studio;
 use super::theme::{self, ACCENT, SURFACE_2, SURFACE_3, TEXT, TEXT_DIM, TEXT_FAINT, bold, font};
 use crate::project::TrackKind;
-use crate::sounds::library::{self, SoundKind};
+use crate::sounds::essentials;
+use crate::sounds::library::{self, PackManifest, SoundKind};
 use crate::sounds::packs::{IndexState, PackManager};
 use crate::sounds::{self, BUILTIN_INSTRUMENTS, BUILTIN_KITS, IMPORT_EXTENSIONS, Preset};
 
@@ -19,11 +20,27 @@ const LIST_HEIGHT: f32 = 340.0;
 /// A SoundFont to pick a preset from: (file, (pack id, file in pack), display name).
 type PresetRequest = (PathBuf, Option<(String, String)>, String);
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Tab {
     BuiltIn,
     Library,
     Store,
+}
+
+/// Where Add Track opens, and the sound it marks as the default (the first
+/// Library row when Essentials is installed, the built-in synth otherwise).
+fn new_track_defaults(drums: bool, essentials_installed: bool) -> (Tab, &'static str) {
+    let tab = if essentials_installed {
+        Tab::Library
+    } else {
+        Tab::BuiltIn
+    };
+    let sound = if drums {
+        sounds::default_kit(essentials_installed)
+    } else {
+        sounds::default_instrument(essentials_installed)
+    };
+    (tab, sound)
 }
 
 #[derive(Clone, PartialEq)]
@@ -49,6 +66,7 @@ enum Target {
 
 pub struct Browser {
     pub open: bool,
+    credits_open: bool,
     page: Page,
     target: Target,
     drums: bool,
@@ -62,6 +80,7 @@ impl Browser {
     pub fn new(packs: PackManager) -> Browser {
         Browser {
             open: false,
+            credits_open: false,
             page: Page::TrackType,
             target: Target::NewTrack,
             drums: false,
@@ -76,7 +95,12 @@ impl Browser {
         self.open = true;
         self.page = Page::TrackType;
         self.target = Target::NewTrack;
+        self.tab = new_track_defaults(false, self.essentials_installed()).0;
         self.filter.clear();
+    }
+
+    fn essentials_installed(&self) -> bool {
+        self.packs.is_installed(essentials::ID).is_some()
     }
 
     /// Open the sound list for an existing track.
@@ -309,11 +333,42 @@ fn link_button(ui: &mut Ui, icon: &str, label: &str) -> bool {
         .clicked()
 }
 
+/// One line per credit; a pack's homepage follows its line.
+fn credit_lines(packs: &[PackManifest]) -> Vec<String> {
+    let mut lines = vec!["Built-in synths and kits — Oxbeat — GPL-3.0-or-later".to_string()];
+    for p in packs {
+        lines.push(format!("{} — {} — {}", p.name, p.author, p.license));
+        if !p.homepage.is_empty() {
+            lines.push(p.homepage.clone());
+        }
+    }
+    lines
+}
+
+fn credits_window(ctx: &egui::Context, b: &mut Browser) {
+    let lines = credit_lines(&b.packs.installed);
+    egui::Window::new("Sound credits")
+        .open(&mut b.credits_open)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            for line in &lines {
+                if line.starts_with("http") {
+                    ui.hyperlink(line);
+                } else {
+                    ui.label(line);
+                }
+            }
+        });
+}
+
 pub fn show(ctx: &egui::Context, studio: &mut Studio, b: &mut Browser) {
     if b.packs.poll() {
         studio.reload_missing();
     }
     b.errors.append(&mut b.packs.errors);
+    if b.credits_open {
+        credits_window(ctx, b);
+    }
     if !b.open {
         return;
     }
@@ -323,7 +378,12 @@ pub fn show(ctx: &egui::Context, studio: &mut Studio, b: &mut Browser) {
             .track(id)
             .and_then(|t| t.sound())
             .map(str::to_string),
-        Target::NewTrack => None,
+        // A new track marks the default sound for its kind.
+        Target::NewTrack => Some(
+            new_track_defaults(b.drums, b.essentials_installed())
+                .1
+                .to_string(),
+        ),
     };
     let r = egui::Modal::new(egui::Id::unique("sound-browser"))
         .frame(
@@ -439,23 +499,44 @@ fn sounds_page(ui: &mut Ui, studio: &mut Studio, b: &mut Browser, current: Optio
                 ) {
                     import = true;
                 }
+                if b.packs.essentials_missing()
+                    && !b.packs.downloads.contains_key(essentials::ID)
+                    && link_button(
+                        ui,
+                        icons::DOWNLOAD,
+                        "Install instruments  (the free Oxbeat sound library)",
+                    )
+                {
+                    b.packs.request_essentials();
+                }
                 let kind = b.kind();
                 let imports: Vec<_> = library::imports()
                     .into_iter()
                     .filter(|i| i.kind == kind)
                     .collect();
                 let mut any = false;
-                for pack in &b.packs.installed {
-                    let sounds: Vec<_> = pack.sounds.iter().filter(|s| s.kind == kind).collect();
+                for category in library::CATEGORIES.iter().copied().chain(["Other"]) {
+                    let sounds: Vec<_> = b
+                        .packs
+                        .installed
+                        .iter()
+                        .flat_map(|p| p.sounds.iter().map(move |s| (p, s)))
+                        .filter(|(p, s)| s.kind == kind && library::category_of(p, s) == category)
+                        .collect();
                     if sounds.is_empty() {
                         continue;
                     }
                     any = true;
-                    section_label(ui, &pack.name);
-                    for s in sounds {
+                    section_label(ui, category);
+                    for (pack, s) in sounds {
                         let id = s.sound_id(&pack.id);
                         let sel = id.is_some() && current == id.as_deref();
-                        if sound_row(ui, icon, &s.name, &s.caption, sel) {
+                        let caption = if s.caption.is_empty() {
+                            pack.name.clone()
+                        } else {
+                            format!("{} · {}", s.caption, pack.name)
+                        };
+                        if sound_row(ui, icon, &s.name, &caption, sel) {
                             match id {
                                 Some(id) => picked = Some((id, s.name.clone())),
                                 None => {
@@ -499,6 +580,10 @@ fn sounds_page(ui: &mut Ui, studio: &mut Studio, b: &mut Browser, current: Optio
                             .color(TEXT_FAINT),
                         );
                     });
+                }
+                ui.add_space(8.0);
+                if link_button(ui, icons::HEADPHONES, "Sound credits") {
+                    b.credits_open = true;
                 }
             }
             Tab::Store => store(ui, b),
@@ -675,5 +760,49 @@ fn presets_page(
             None => library::import_sound(path, &label, Some(preset), b.kind()),
         };
         b.pick(studio, &sound, &label);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sounds::library::PackManifest;
+
+    fn pack(name: &str, homepage: &str) -> PackManifest {
+        serde_json::from_str(&format!(
+            r#"{{"id":"p","name":"{name}","author":"Ann","license":"CC0","homepage":"{homepage}","sounds":[]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn new_tracks_default_to_essentials_when_installed() {
+        assert_eq!(
+            new_track_defaults(false, true),
+            (Tab::Library, "pack:essentials/Grand Piano.sfz")
+        );
+        assert_eq!(
+            new_track_defaults(true, true),
+            (Tab::Library, "pack:essentials/Drums.sfz")
+        );
+        assert_eq!(new_track_defaults(false, false), (Tab::BuiltIn, "Keys"));
+        assert_eq!(
+            new_track_defaults(true, false),
+            (Tab::BuiltIn, "Studio Kit")
+        );
+    }
+
+    #[test]
+    fn credit_lines_list_every_installed_pack() {
+        let lines = credit_lines(&[pack("A", "https://a.example"), pack("B", "")]);
+        assert_eq!(
+            lines,
+            [
+                "Built-in synths and kits — Oxbeat — GPL-3.0-or-later",
+                "A — Ann — CC0",
+                "https://a.example",
+                "B — Ann — CC0",
+            ]
+        );
     }
 }

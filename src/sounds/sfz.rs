@@ -402,10 +402,7 @@ mod tests {
         )
         .unwrap();
         let regions = build_regions(&parsed, |_| {
-            Ok(Arc::new(SampleData {
-                rate: 44_100,
-                frames: vec![0.0; 400],
-            }))
+            Ok(Arc::new(SampleData::stereo(44_100, vec![0.0; 400])))
         })
         .unwrap();
         let r = &regions[0];

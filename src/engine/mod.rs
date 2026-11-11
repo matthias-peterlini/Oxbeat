@@ -699,7 +699,7 @@ fn mix_clip(
         return;
     }
     let ratio = data.rate as f64 / sr as f64;
-    let frames = data.frames.len() / 2;
+    let frames = data.len();
     let first = clip_start.saturating_sub(block_start) as usize;
     let last = (clip_end.min(block_end) - block_start) as usize;
     for i in first..last {
@@ -711,8 +711,8 @@ fn mix_clip(
         }
         let next = (idx + 1).min(frames - 1);
         let frac = (pos - idx as f64) as f32;
-        let (l0, r0) = (data.frames[idx * 2], data.frames[idx * 2 + 1]);
-        let (l1, r1) = (data.frames[next * 2], data.frames[next * 2 + 1]);
+        let (l0, r0) = data.frame(idx);
+        let (l1, r1) = data.frame(next);
         left[i] += l0 + (l1 - l0) * frac;
         right[i] += r0 + (r1 - r0) * frac;
     }

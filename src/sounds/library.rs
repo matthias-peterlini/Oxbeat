@@ -47,6 +47,9 @@ pub struct PackSound {
     /// "bank:program" for SoundFonts; none means "let me choose".
     #[serde(default)]
     pub preset: Option<String>,
+    /// Instrument family (one of `CATEGORIES`); empty falls back to the pack's.
+    #[serde(default)]
+    pub category: String,
 }
 
 /// `pack.json` at the root of every pack.
@@ -62,7 +65,37 @@ pub struct PackManifest {
     pub license: String,
     #[serde(default)]
     pub description: String,
+    /// Default instrument family for sounds that don't name one.
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub homepage: String,
     pub sounds: Vec<PackSound>,
+}
+
+/// Instrument families the sound browser groups by, in display order.
+pub const CATEGORIES: [&str; 10] = [
+    "Keyboards",
+    "Strings",
+    "Guitars",
+    "Bass",
+    "Winds",
+    "Brass",
+    "Percussion",
+    "Drums",
+    "Synths",
+    "World",
+];
+
+/// The sound's category if known, else the pack's if known, else "Other".
+pub fn category_of<'a>(pack: &'a PackManifest, sound: &'a PackSound) -> &'a str {
+    if CATEGORIES.contains(&sound.category.as_str()) {
+        &sound.category
+    } else if CATEGORIES.contains(&pack.category.as_str()) {
+        &pack.category
+    } else {
+        "Other"
+    }
 }
 
 impl PackSound {
@@ -174,6 +207,7 @@ mod tests {
             kind: SoundKind::Instrument,
             caption: String::new(),
             preset: Some("0:0".into()),
+            category: String::new(),
         };
         assert_eq!(
             s.sound_id("gm").as_deref(),
@@ -190,6 +224,37 @@ mod tests {
             ..s
         };
         assert_eq!(sfz.sound_id("p").as_deref(), Some("pack:p/piano.sfz"));
+    }
+
+    fn manifest(pack_cat: &str, sound_cat: &str) -> PackManifest {
+        serde_json::from_str(&format!(
+            r#"{{"id":"p","name":"P","category":"{pack_cat}","homepage":"https://example.com",
+               "sounds":[{{"name":"S","file":"s.wav","category":"{sound_cat}"}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn category_falls_back_to_pack() {
+        let m = manifest("Woodwinds", "");
+        assert_eq!(category_of(&m, &m.sounds[0]), "Other");
+        let m = manifest("Strings", "");
+        assert_eq!(category_of(&m, &m.sounds[0]), "Strings");
+        let m = manifest("Strings", "Keyboards");
+        assert_eq!(category_of(&m, &m.sounds[0]), "Keyboards");
+        // Unknown sound categories fall back instead of hiding the sound.
+        let m = manifest("Strings", "Woodwinds");
+        assert_eq!(category_of(&m, &m.sounds[0]), "Strings");
+        let m = manifest("Woodwinds", "keyboards");
+        assert_eq!(category_of(&m, &m.sounds[0]), "Other");
+        let m = manifest("Strings", "Keyboards");
+        assert_eq!(m.homepage, "https://example.com");
+        // Old manifests without the new fields still parse.
+        let old: PackManifest =
+            serde_json::from_str(r#"{"id":"o","name":"O","sounds":[{"name":"S","file":"s.wav"}]}"#)
+                .unwrap();
+        assert_eq!(category_of(&old, &old.sounds[0]), "Other");
+        assert_eq!(old.homepage, "");
     }
 
     #[test]

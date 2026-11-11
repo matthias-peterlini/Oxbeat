@@ -347,12 +347,15 @@ mod tests {
         let path = dir.path().join("song.mp3");
         export(&song(), Path::new("."), &path, &mut |_| {}).unwrap();
         let decoded = crate::sounds::decode::decode_file(&path).unwrap();
+        let crate::engine::sampler::Frames::Stereo(frames) = &decoded.frames else {
+            panic!("decode_file returns stereo")
+        };
         assert_eq!(decoded.rate, EXPORT_RATE);
         let seconds = decoded.len() as f64 / EXPORT_RATE as f64;
         assert!((2.0..3.6).contains(&seconds), "{seconds} s");
         // Silent before the note, sounding during it.
-        assert!(peak(&decoded.frames[..20_000 * 2]) < 0.01);
-        assert!(peak(&decoded.frames[24_000 * 2..40_000 * 2]) > 0.01);
+        assert!(peak(&frames[..20_000 * 2]) < 0.01);
+        assert!(peak(&frames[24_000 * 2..40_000 * 2]) > 0.01);
     }
 
     #[test]

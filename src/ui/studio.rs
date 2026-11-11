@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::history::History;
+use super::loader::{Loaded, Loader};
 use crate::audio::recorder::Recorder;
 use crate::engine::commands::{EngineCommand, EngineEvent, METER_TRACKS, Meters, UiEnd};
 use crate::engine::fx::Chain;
 use crate::engine::instrument::{Instrument, sound_hash};
 use crate::engine::sampler::SampleData;
 use crate::project::effects::EffectKind;
-use crate::project::{Clip, Note, Project};
+use crate::project::{Clip, Note, Project, TrackKind};
 
 /// Voice takes shorter than this (an accidental tap of R) are thrown away.
 const MIN_TAKE_SECONDS: f64 = 0.05;
@@ -85,16 +86,24 @@ pub struct Waveform {
 
 impl Waveform {
     pub fn of(data: &SampleData) -> Self {
-        let peaks = data
-            .frames
-            .chunks(FRAMES_PER_PEAK * 2)
-            .map(|c| c.iter().fold(0.0f32, |m, x| m.max(x.abs())).min(1.0))
+        let peaks = (0..data.len())
+            .step_by(FRAMES_PER_PEAK)
+            .map(|start| {
+                let end = (start + FRAMES_PER_PEAK).min(data.len());
+                (start..end)
+                    .map(|i| {
+                        let (l, r) = data.frame(i);
+                        l.abs().max(r.abs())
+                    })
+                    .fold(0.0f32, f32::max)
+                    .min(1.0)
+            })
             .collect();
         let rate = data.rate.max(1) as f64;
         Self {
             peaks,
             seconds_per_peak: FRAMES_PER_PEAK as f64 / rate,
-            seconds: (data.frames.len() / 2) as f64 / rate,
+            seconds: data.len() as f64 / rate,
         }
     }
 
@@ -127,6 +136,10 @@ struct LoadedAudio {
 pub struct Studio {
     pub project: Project,
     history: History,
+    /// The project was opened from, or saved to, disk.
+    on_disk: bool,
+    /// Essentials arrived mid-playback or mid-take; upgrade the starter once stopped.
+    starter_upgrade_waiting: bool,
     /// The clip picked in the arrangement, if any.
     pub selected_clip: Option<u64>,
     /// Click on every beat while playing.
@@ -162,8 +175,12 @@ pub struct Studio {
     pub master_level: [f32; 2],
     /// Kinds of effect in the chain the engine has for each track.
     fx_sent: HashMap<u64, Vec<EffectKind>>,
-    /// Sound id each track's engine instrument was built from.
+    /// Sound id each track's engine instrument was built (or is being built) from.
     loaded: HashMap<u64, String>,
+    /// Tracks waiting for a file or pack instrument from the loader -> its sound id.
+    /// A newer request for a track replaces the older one.
+    loading: HashMap<u64, String>,
+    loader: Loader,
     /// Audio clips the engine has been given, by clip id.
     loaded_audio: HashMap<u64, LoadedAudio>,
     pub waveforms: HashMap<u64, Arc<Waveform>>,
@@ -174,10 +191,19 @@ pub struct Studio {
 }
 
 impl Studio {
+    #[cfg(test)]
     pub fn new(project: Project, link: UiEnd) -> Self {
+        Self::with_sample_rate(project, link, 48_000)
+    }
+
+    /// For an engine already running at `sample_rate`, so instruments are built
+    /// once, at the right rate.
+    pub fn with_sample_rate(project: Project, link: UiEnd, sample_rate: u32) -> Self {
         let selected = project.tracks.first().map_or(0, |t| t.id);
         let mut s = Self {
             history: History::new(&project),
+            on_disk: false,
+            starter_upgrade_waiting: false,
             selected_clip: None,
             metronome: false,
             count_in: false,
@@ -199,7 +225,7 @@ impl Studio {
             pending: Vec::new(),
             voice_take: None,
             discard_take: false,
-            sample_rate: 48_000,
+            sample_rate,
             audio_dir: unsaved_audio_dir(),
             input_name: None,
             input_level: 0.0,
@@ -207,6 +233,8 @@ impl Studio {
             master_level: [0.0; 2],
             fx_sent: HashMap::new(),
             loaded: HashMap::new(),
+            loading: HashMap::new(),
+            loader: Loader::sounds(),
             loaded_audio: HashMap::new(),
             waveforms: HashMap::new(),
             load_errors: Vec::new(),
@@ -216,11 +244,45 @@ impl Studio {
         s
     }
 
-    /// A first-launch project: one "Keys" track, ready to play.
-    pub fn starter_project() -> Project {
+    /// A first-launch project: one piano track, ready to play.
+    pub fn starter_project(essentials_installed: bool) -> Project {
         let mut p = Project::default();
-        p.add_instrument_track("Keys");
+        p.add_instrument_track(crate::sounds::default_instrument(essentials_installed));
         p
+    }
+
+    /// The project now has a file on disk (opened or saved): no longer a blank starter.
+    pub fn mark_on_disk(&mut self) {
+        self.on_disk = true;
+    }
+
+    /// Essentials just arrived: move an untouched starter project from "Keys" onto the
+    /// grand piano. Returns true when it did (the caller then syncs). While playing or
+    /// recording it waits, and `drain_events` applies it once stopped.
+    pub fn upgrade_starter_track(&mut self) -> bool {
+        if self.playing || self.recording {
+            self.starter_upgrade_waiting = true;
+            return false;
+        }
+        self.starter_upgrade_waiting = false;
+        let untouched = !self.on_disk
+            && !self.history.can_undo()
+            && self.project.tracks.len() == 1
+            && self.project.tracks[0].clips.is_empty()
+            && matches!(
+                &self.project.tracks[0].kind,
+                TrackKind::Instrument { preset } if preset == "Keys"
+            );
+        if !untouched {
+            return false;
+        }
+        let t = &mut self.project.tracks[0];
+        t.kind = TrackKind::Instrument {
+            preset: crate::sounds::ESSENTIALS_PIANO.to_string(),
+        };
+        t.name = "Grand Piano".to_string();
+        self.history.reset(&self.project);
+        true
     }
 
     /// Push the current project, and any instruments or audio that changed, to the engine.
@@ -235,6 +297,7 @@ impl Studio {
             .collect();
         for track in gone {
             self.loaded.remove(&track);
+            self.loading.remove(&track);
             self.shared.send(EngineCommand::SetInstrument {
                 track,
                 sound: 0,
@@ -254,23 +317,21 @@ impl Studio {
             .filter(|(id, s)| self.loaded.get(id) != Some(s))
             .collect();
         for (track, sound) in changed {
-            let instrument = match crate::sounds::load(&sound, self.sample_rate) {
-                Ok(i) => {
-                    self.failed.remove(&track);
-                    i
-                }
-                Err(e) => {
-                    self.failed.insert(track);
-                    self.load_errors
-                        .push(format!("Could not load \"{sound}\": {e}"));
-                    Instrument::None
-                }
-            };
-            self.shared.send(EngineCommand::SetInstrument {
-                track,
-                sound: sound_hash(&sound),
-                instrument: Box::new(instrument),
-            });
+            // Built-in synths and kits are instant; anything else is decoded on the
+            // loader's thread and handed over in `poll_loads`. Until then the track
+            // is silent or keeps its previous instrument.
+            if let Some(instrument) = Instrument::builtin(&sound, self.sample_rate) {
+                self.failed.remove(&track);
+                self.loading.remove(&track);
+                self.shared.send(EngineCommand::SetInstrument {
+                    track,
+                    sound: sound_hash(&sound),
+                    instrument: Box::new(instrument),
+                });
+            } else {
+                self.loader.request(&sound, self.sample_rate);
+                self.loading.insert(track, sound.clone());
+            }
             self.loaded.insert(track, sound);
         }
         if self
@@ -280,6 +341,71 @@ impl Studio {
             self.selected_clip = None;
         }
         self.history.record(&self.project, Instant::now());
+    }
+
+    /// Wake the UI when a background load finishes.
+    pub fn set_repaint(&self, f: impl Fn() + Send + Sync + 'static) {
+        self.loader.set_repaint(f);
+    }
+
+    #[cfg(test)]
+    fn set_loader(&mut self, loader: Loader) {
+        self.loader = loader;
+    }
+
+    /// Hand finished background loads to the engine. Call every frame.
+    pub fn poll_loads(&mut self) {
+        while let Some(l) = self.loader.try_recv() {
+            self.apply_loaded(l);
+        }
+    }
+
+    fn apply_loaded(&mut self, l: Loaded) {
+        // Built for an engine rate we no longer run at: a fresh request is queued.
+        if l.sample_rate != self.sample_rate {
+            return;
+        }
+        let mut tracks: Vec<u64> = self
+            .loading
+            .iter()
+            .filter(|(_, s)| **s == l.sound)
+            .map(|(t, _)| *t)
+            .collect();
+        // No track wants this sound any more (changed or deleted): drop it.
+        if tracks.is_empty() {
+            return;
+        }
+        tracks.sort_unstable();
+        let hash = sound_hash(&l.sound);
+        match l.result {
+            Ok(instrument) => {
+                let track = tracks[0];
+                self.loading.remove(&track);
+                self.failed.remove(&track);
+                self.shared.send(EngineCommand::SetInstrument {
+                    track,
+                    sound: hash,
+                    instrument: Box::new(instrument),
+                });
+                // Every track needs its own instrument; the samples are cached now.
+                if tracks.len() > 1 {
+                    self.loader.request(&l.sound, self.sample_rate);
+                }
+            }
+            Err(e) => {
+                self.load_errors
+                    .push(format!("Could not load \"{}\": {e}", l.sound));
+                for track in tracks {
+                    self.loading.remove(&track);
+                    self.failed.insert(track);
+                    self.shared.send(EngineCommand::SetInstrument {
+                        track,
+                        sound: hash,
+                        instrument: Box::new(Instrument::None),
+                    });
+                }
+            }
+        }
     }
 
     pub fn set_metronome(&mut self, on: bool) {
@@ -549,6 +675,7 @@ impl Studio {
         }
         self.project = project;
         self.history.reset(&self.project);
+        self.on_disk = false;
         self.selected_clip = None;
         self.audio_dir = audio_dir;
         self.pending.clear();
@@ -586,9 +713,17 @@ impl Studio {
         self.send_loop();
     }
 
+    /// Apply engine events and finished instrument loads. Call every frame.
     pub fn drain_events(&mut self) {
         while let Ok(e) = self.events.pop() {
             self.apply_event(e);
+        }
+        self.poll_loads();
+        if self.starter_upgrade_waiting && !self.playing && !self.recording {
+            // Still decided by whether the project is untouched now.
+            if self.upgrade_starter_track() {
+                self.sync();
+            }
         }
     }
 
@@ -791,8 +926,10 @@ fn write_wav(path: &Path, data: &SampleData) -> Result<(), String> {
         sample_format: hound::SampleFormat::Float,
     };
     let mut w = hound::WavWriter::create(path, spec).map_err(|e| e.to_string())?;
-    for s in &data.frames {
-        w.write_sample(*s).map_err(|e| e.to_string())?;
+    for i in 0..data.len() {
+        let (l, r) = data.frame(i);
+        w.write_sample(l).map_err(|e| e.to_string())?;
+        w.write_sample(r).map_err(|e| e.to_string())?;
     }
     w.finalize().map_err(|e| e.to_string())
 }
@@ -817,10 +954,191 @@ mod tests {
     ) {
         let (ui, end) = crate::engine::commands::link();
         (
-            Studio::new(Studio::starter_project(), ui),
+            Studio::new(Studio::starter_project(false), ui),
             end.commands,
             end.events,
         )
+    }
+
+    #[test]
+    fn starter_upgrade_only_when_untouched() {
+        let (mut s, _, _) = studio();
+        assert!(s.upgrade_starter_track());
+        let t = &s.project.tracks[0];
+        assert_eq!(t.sound(), Some(crate::sounds::ESSENTIALS_PIANO));
+        assert_eq!(t.name, "Grand Piano");
+
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.project.add_empty_clip(t, 0.0, 4.0);
+        s.sync();
+        assert!(!s.upgrade_starter_track());
+
+        let (mut s, _, _) = studio();
+        s.replace_project(Studio::starter_project(false), unsaved_audio_dir());
+        s.mark_on_disk();
+        assert!(!s.upgrade_starter_track());
+
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.project.track_mut(t).unwrap().kind = crate::project::TrackKind::Instrument {
+            preset: "Bass".into(),
+        };
+        assert!(!s.upgrade_starter_track());
+    }
+
+    fn set_sound(s: &mut Studio, track: u64, sound: &str) {
+        s.project.track_mut(track).unwrap().kind = TrackKind::Instrument {
+            preset: sound.into(),
+        };
+    }
+
+    /// Sound hashes of the SetInstrument commands sent for `track`.
+    fn instruments_sent(crx: &mut rtrb::Consumer<EngineCommand>, track: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        while let Ok(c) = crx.pop() {
+            if let EngineCommand::SetInstrument {
+                track: t, sound, ..
+            } = c
+                && t == track
+            {
+                out.push(sound);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn file_sounds_load_off_the_calling_thread() {
+        let (mut s, mut crx, _) = studio();
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        let seen = threads.clone();
+        s.set_loader(Loader::new(move |_, sr| {
+            seen.lock().unwrap().push(std::thread::current().id());
+            crate::sounds::load("Keys", sr)
+        }));
+        let t = s.selected();
+        let other = s.project.add_instrument_track("Keys");
+        s.sync();
+        crx_drain(&mut crx);
+        set_sound(&mut s, t, "file:/piano.sfz");
+        set_sound(&mut s, other, "file:/piano.sfz");
+        s.sync();
+        assert!(
+            instruments_sent(&mut crx, t).is_empty(),
+            "loaded during sync"
+        );
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let (mut got_t, mut got_other) = (false, false);
+        while !(got_t && got_other) && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            s.poll_loads();
+            while let Ok(c) = crx.pop() {
+                if let EngineCommand::SetInstrument { track, sound, .. } = c {
+                    assert_eq!(sound, sound_hash("file:/piano.sfz"));
+                    got_t |= track == t;
+                    got_other |= track == other;
+                }
+            }
+        }
+        assert!(got_t && got_other, "both tracks get their instrument");
+        let threads = threads.lock().unwrap();
+        assert_eq!(threads.len(), 2, "one load per track, one at a time");
+        assert!(threads.iter().all(|id| *id != std::thread::current().id()));
+    }
+
+    fn crx_drain(crx: &mut rtrb::Consumer<EngineCommand>) {
+        while crx.pop().is_ok() {}
+    }
+
+    #[test]
+    fn stale_load_results_are_dropped() {
+        let (mut s, mut crx, _) = studio();
+        // A loader that never finishes on its own, so only hand-fed results arrive.
+        let (gate, wait) = std::sync::mpsc::channel::<()>();
+        s.set_loader(Loader::new(move |_, _| {
+            let _ = wait.recv();
+            Err("cancelled".into())
+        }));
+        let t = s.selected();
+        set_sound(&mut s, t, "file:/a.sfz");
+        s.sync();
+        set_sound(&mut s, t, "file:/b.sfz");
+        s.sync();
+        crx_drain(&mut crx);
+        let keys = || Ok(Instrument::builtin("Keys", 48_000).unwrap());
+        s.apply_loaded(Loaded {
+            sound: "file:/a.sfz".into(),
+            sample_rate: s.sample_rate,
+            result: keys(),
+        });
+        s.apply_loaded(Loaded {
+            sound: "file:/b.sfz".into(),
+            sample_rate: s.sample_rate + 1,
+            result: keys(),
+        });
+        assert!(
+            instruments_sent(&mut crx, t).is_empty(),
+            "stale result applied"
+        );
+        s.apply_loaded(Loaded {
+            sound: "file:/b.sfz".into(),
+            sample_rate: s.sample_rate,
+            result: keys(),
+        });
+        assert_eq!(
+            instruments_sent(&mut crx, t),
+            vec![sound_hash("file:/b.sfz")]
+        );
+        drop(gate);
+    }
+
+    #[test]
+    fn starter_upgrade_waits_until_stopped() {
+        let piano = Some(crate::sounds::ESSENTIALS_PIANO);
+        // Playing: deferred, then applied once stopped.
+        let (mut s, _, _) = studio();
+        s.play_stop();
+        assert!(!s.upgrade_starter_track());
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), Some("Keys"));
+        s.play_stop();
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), piano);
+        assert!(!s.can_undo());
+
+        // Recording (or counting in): same.
+        let (mut s, _, _) = studio();
+        s.record();
+        assert!(!s.upgrade_starter_track());
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), Some("Keys"));
+        s.record(); // stops
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), piano);
+
+        // A take recorded meanwhile means the project is no longer untouched.
+        let (mut s, _, _) = studio();
+        let t = s.selected();
+        s.record();
+        assert!(!s.upgrade_starter_track());
+        s.apply_event(EngineEvent::RecordedNote {
+            track: t,
+            note: Note {
+                pitch: 60,
+                velocity: 100,
+                start_beat: 0.5,
+                length_beats: 1.0,
+            },
+        });
+        s.apply_event(EngineEvent::RecordFinished {
+            track: t,
+            start_beat: 0.0,
+            length_beats: 4.0,
+        });
+        s.record();
+        s.drain_events();
+        assert_eq!(s.project.tracks[0].sound(), Some("Keys"));
     }
 
     #[test]
@@ -893,7 +1211,7 @@ mod tests {
     fn replacing_project_mid_take_drops_old_take() {
         let (mut s, _, _) = studio();
         s.record();
-        s.replace_project(Studio::starter_project(), unsaved_audio_dir());
+        s.replace_project(Studio::starter_project(false), unsaved_audio_dir());
         let t = s.selected();
         s.apply_event(EngineEvent::RecordedNote {
             track: t,
@@ -1014,14 +1332,7 @@ mod voice_tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut s, t, _end) = voice_studio(dir.path());
         let src = dir.path().join("loop.wav");
-        write_wav(
-            &src,
-            &SampleData {
-                rate: 44_100,
-                frames: vec![0.25; 44_100 * 2],
-            },
-        )
-        .unwrap();
+        write_wav(&src, &SampleData::stereo(44_100, vec![0.25; 44_100 * 2])).unwrap();
         s.position = 4.0;
         s.import_audio(&src).unwrap();
         let clip = s.project.track(t).unwrap().clips[0].clone();
@@ -1041,7 +1352,7 @@ mod voice_tests {
     #[test]
     fn import_needs_a_voice_track() {
         let (ui, _end) = link();
-        let mut s = Studio::new(Studio::starter_project(), ui);
+        let mut s = Studio::new(Studio::starter_project(false), ui);
         assert!(s.import_audio(Path::new("nope.wav")).is_err());
     }
 }
